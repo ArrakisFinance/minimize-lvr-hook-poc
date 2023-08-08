@@ -7,20 +7,18 @@ import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/libraries/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/contracts/types/BalanceDelta.sol";
+import {ERC20} from "v4-periphery/../lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 
-contract DiamondHookPoC is BaseHook {
+contract DiamondHookPoC is BaseHook, ERC20 {
     using PoolIdLibrary for IPoolManager.PoolKey;
 
-    uint256 public beforeSwapCount;
-    uint256 public afterSwapCount;
-
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {}
+    constructor(IPoolManager _poolManager) BaseHook(_poolManager) ERC20("Diamond LP Token", "DLPT") {}
 
     function getHooksCalls() public pure override returns (Hooks.Calls memory) {
         return Hooks.Calls({
             beforeInitialize: false,
             afterInitialize: false,
-            beforeModifyPosition: false,
+            beforeModifyPosition: true,
             afterModifyPosition: false,
             beforeSwap: true,
             afterSwap: true,
@@ -31,19 +29,29 @@ contract DiamondHookPoC is BaseHook {
 
     function beforeSwap(address, IPoolManager.PoolKey calldata, IPoolManager.SwapParams calldata)
         external
+        pure
         override
         returns (bytes4)
     {
-        beforeSwapCount++;
         return BaseHook.beforeSwap.selector;
     }
 
     function afterSwap(address, IPoolManager.PoolKey calldata, IPoolManager.SwapParams calldata, BalanceDelta)
         external
+        pure
         override
         returns (bytes4)
     {
-        afterSwapCount++;
         return BaseHook.afterSwap.selector;
+    }
+
+    /// @dev force LPs to provide liquidity through hook by adding some requirements here ??
+    function beforeModifyPosition(address, IPoolManager.PoolKey calldata, IPoolManager.ModifyPositionParams calldata)
+        external
+        pure
+        override
+        returns (bytes4)
+    {
+        return BaseHook.beforeModifyPosition.selector;
     }
 }
