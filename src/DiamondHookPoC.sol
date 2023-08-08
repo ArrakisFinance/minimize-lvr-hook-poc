@@ -12,6 +12,8 @@ import {ERC20} from "v4-periphery/../lib/openzeppelin-contracts/contracts/token/
 contract DiamondHookPoC is BaseHook, ERC20 {
     using PoolIdLibrary for IPoolManager.PoolKey;
 
+    bool internal modifyViaHook;
+
     constructor(IPoolManager _poolManager) BaseHook(_poolManager) ERC20("Diamond LP Token", "DLPT") {}
 
     function getHooksCalls() public pure override returns (Hooks.Calls memory) {
@@ -48,10 +50,11 @@ contract DiamondHookPoC is BaseHook, ERC20 {
     /// @dev force LPs to provide liquidity through hook by adding some requirements here ??
     function beforeModifyPosition(address, IPoolManager.PoolKey calldata, IPoolManager.ModifyPositionParams calldata)
         external
-        pure
+        view
         override
         returns (bytes4)
     {
+        require(modifyViaHook, "Must mint liquidity via hook");
         return BaseHook.beforeModifyPosition.selector;
     }
 }
