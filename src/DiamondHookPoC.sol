@@ -34,6 +34,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     error NotPoolManagerToken();
     error OnlyModifyViaHook();
+    error InvalidTickBounds();
 
     /// @dev these could be TRANSIENT STORAGE eventually
     bool internal _modifyViaHook;
@@ -55,7 +56,14 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         bytes customPayload;
     }
 
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) ERC20("Diamond LP Token", "DLPT") {}
+    constructor(
+        IPoolManager _poolManager,
+        int24 _lowerTick,
+        int24 _upperTick
+    ) BaseHook(_poolManager) ERC20("Diamond LP Token", "DLPT") {
+        lowerTick = _lowerTick;
+        upperTick = _upperTick;
+    }
 
     function onERC1155Received(
         address,
@@ -94,7 +102,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     function getHooksCalls() public pure override returns (Hooks.Calls memory) {
         return Hooks.Calls({
-            beforeInitialize: false,
+            beforeInitialize: true,
             afterInitialize: false,
             beforeModifyPosition: true,
             afterModifyPosition: false,
@@ -103,6 +111,23 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             beforeDonate: false,
             afterDonate: false
         });
+    }
+
+    function beforeInitialize(
+        address,
+        PoolKey calldata poolKey_,
+        uint160
+    ) external override returns (bytes4) {
+        if (
+            lowerTick % poolKey_.tickSpacing != 0 || 
+            upperTick % poolKey_.tickSpacing != 0 || 
+            lowerTick < poolKey_.tickSpacing.minUsableTick() || 
+            upperTick > poolKey_.tickSpacing.maxUsableTick()
+        ) revert InvalidTickBounds();
+
+        poolKey = poolKey_;
+        lastBlockTouch = block.number;
+        return this.beforeInitialize.selector;
     }
 
     function beforeSwap(address, PoolKey calldata, IPoolManager.SwapParams calldata)
