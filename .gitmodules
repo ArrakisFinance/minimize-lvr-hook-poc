@@ -6,7 +6,7 @@
 	url = https://github.com/Uniswap/v4-core
 [submodule "lib/openzeppelin-contracts"]
 	path = lib/openzeppelin-contracts
-	url = https://github.com/OpenZeppelin/openzeppelin-contracts@8643fd45fda2741b13145e60931383dfe5794a33
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts
 [submodule "lib/periphery-next"]
 	path = lib/periphery-next
 	url = https://github.com/Uniswap/periphery-next@6fdd287e5ed38b355bf1867c797bcfb32a329cda
