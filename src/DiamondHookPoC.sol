@@ -47,7 +47,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     uint256 public lastBlockTouch;
 
     struct PoolManagerCallData {
-        uint8 actionType; // 0 for mint, 1 for burn, 2 for rebalance.
+        uint8 actionType; // 0 for mint, 1 for burn
         uint256 mintAmount;
         uint256 burnAmount;
         address receiver;
@@ -364,23 +364,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             // mint back the position.
 
-            (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
-                PoolIdLibrary.toId(poolKey)
-            );
-
-            uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-                sqrtPriceX96,
-                TickMath.getSqrtRatioAtTick(lowerTick),
-                TickMath.getSqrtRatioAtTick(upperTick),
-                currency0Balance,
-                currency1Balance
-            );
+            uint256 liquidity = FullMath.mulDiv(pMCallData.mintAmount, info.liquidity, totalSupply);
 
             if (liquidity > 0)
                 poolManager.modifyPosition(
                     poolKey,
                     IPoolManager.ModifyPositionParams({
-                        liquidityDelta: SafeCast.toInt256(uint256(liquidity)),
+                        liquidityDelta: SafeCast.toInt256(liquidity),
                         tickLower: lowerTick,
                         tickUpper: upperTick
                     })
@@ -509,25 +499,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             currency1Balance = SafeCast.toUint256(currency1BalanceRaw);
 
             {
-                (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
-                    PoolIdLibrary.toId(poolKey)
-                );
-
-                uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-                    sqrtPriceX96,
-                    TickMath.getSqrtRatioAtTick(lowerTick),
-                    TickMath.getSqrtRatioAtTick(upperTick),
-                    currency0Balance,
-                    currency1Balance
-                );
+                uint256 liquidity = uint256(info.liquidity) - FullMath.mulDiv(pMCallData.burnAmount, info.liquidity, totalSupply);
 
                 if (liquidity > 0)
                     poolManager.modifyPosition(
                         poolKey,
                         IPoolManager.ModifyPositionParams({
-                            liquidityDelta: SafeCast.toInt256(
-                                uint256(liquidity)
-                            ),
+                            liquidityDelta: SafeCast.toInt256(liquidity),
                             tickLower: lowerTick,
                             tickUpper: upperTick
                         })
