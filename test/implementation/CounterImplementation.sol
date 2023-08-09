@@ -3,7 +3,7 @@ pragma solidity ^0.8.19;
 
 import {Counter} from "../../src/Counter.sol";
 
-import {BaseHook} from "v4-periphery/BaseHook.sol";
+import {BaseHook} from "@uniswap/v4-periphery/contracts/BaseHook.sol";
 import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
 import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
 
