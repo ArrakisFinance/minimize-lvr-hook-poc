@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity =0.8.19;
+pragma solidity ^0.8.20;
 
-import {BaseHook} from "v4-periphery/BaseHook.sol";
+import {BaseHook} from "@uniswap/v4-periphery/contracts/BaseHook.sol";
 
 import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
+import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
 import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/libraries/PoolId.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/types/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/contracts/types/BalanceDelta.sol";
-import {ERC20} from "v4-periphery/../lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 contract DiamondHookPoC is BaseHook, ERC20 {
-    using PoolIdLibrary for IPoolManager.PoolKey;
+    using PoolIdLibrary for PoolKey;
 
     bool internal modifyViaHook;
 
@@ -29,7 +30,7 @@ contract DiamondHookPoC is BaseHook, ERC20 {
         });
     }
 
-    function beforeSwap(address, IPoolManager.PoolKey calldata, IPoolManager.SwapParams calldata)
+    function beforeSwap(address, PoolKey calldata, IPoolManager.SwapParams calldata)
         external
         pure
         override
@@ -38,7 +39,7 @@ contract DiamondHookPoC is BaseHook, ERC20 {
         return BaseHook.beforeSwap.selector;
     }
 
-    function afterSwap(address, IPoolManager.PoolKey calldata, IPoolManager.SwapParams calldata, BalanceDelta)
+    function afterSwap(address, PoolKey calldata, IPoolManager.SwapParams calldata, BalanceDelta)
         external
         pure
         override
@@ -48,7 +49,7 @@ contract DiamondHookPoC is BaseHook, ERC20 {
     }
 
     /// @dev force LPs to provide liquidity through hook by adding some requirements here ??
-    function beforeModifyPosition(address, IPoolManager.PoolKey calldata, IPoolManager.ModifyPositionParams calldata)
+    function beforeModifyPosition(address, PoolKey calldata, IPoolManager.ModifyPositionParams calldata)
         external
         view
         override
