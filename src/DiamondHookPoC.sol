@@ -39,6 +39,9 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     error NotTopOfBlock();
     error InvalidTopOfBlockSwap();
     error ZeroLiquidity();
+    error MintZero();
+    error BurnZero();
+    error BurnOverflow();
 
     int24 public immutable lowerTick;
     int24 public immutable upperTick;
@@ -52,14 +55,15 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     /// ----------
 
     uint256 public lastBlockTouch;
+    uint256 public sqrtPriceCommitment;
     PoolKey public poolKey;
     bool public initialized;
 
-    struct PoolManagerCallData {
-        uint256 amount;
+    struct PoolManagerCalldata {
+        uint256 amount; /// mintAmount | burnAmount | newSqrtPriceX96 (inferred from actionType)
         address msgSender;
         address receiver;
-        uint8 actionType; // 0 for mint, 1 for burn, 2 for arb swap
+        uint8 actionType; /// 0 = mint | 1 = burn | 2 = arbSwap
     }
 
     constructor(
@@ -71,7 +75,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     ) BaseHook(_poolManager) ERC20("Diamond LP Token", "DLPT") {
         lowerTick = _lowerTick;
         upperTick = _upperTick;
-        require(_baseBeta < 10000 && _decayRate < _baseBeta);
+        require(_baseBeta < 10000 && _decayRate <= _baseBeta);
         baseBeta = _baseBeta;
         decayRate = _decayRate;
     }
@@ -129,7 +133,10 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         PoolKey calldata poolKey_,
         uint160
     ) external override returns (bytes4) {
+        /// can only initialize one pool once.
         if (initialized) revert AlreadyInitialized();
+
+        /// validate tick bounds on pool initialization
         if (
             lowerTick % poolKey_.tickSpacing != 0 || 
             upperTick % poolKey_.tickSpacing != 0 || 
@@ -137,6 +144,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             upperTick > poolKey_.tickSpacing.maxUsableTick()
         ) revert InvalidTickBounds();
 
+        /// initialize state variable
         poolKey = poolKey_;
         lastBlockTouch = block.number;
         initialized = true;
@@ -150,6 +158,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         override
         returns (bytes4)
     {
+        /// disallow normal swaps at top of block
         if (lastBlockTouch != block.number) revert InvalidTopOfBlockSwap();
         return BaseHook.beforeSwap.selector;
     }
@@ -160,7 +169,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         override
         returns (bytes4)
     {
-        /// TODO !!!
+        /// TODO check hedger invariant after all swaps
         return BaseHook.afterSwap.selector;
     }
 
@@ -170,70 +179,90 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         override
         returns (bytes4)
     {
-        /// @dev force LPs to provide liquidity through hook
+        /// force LPs to provide liquidity through hook
         if (!_modifyViaHook) revert OnlyModifyViaHook();
         return BaseHook.beforeModifyPosition.selector;
     }
 
+    /// method called back on PoolManager.lock()
     function lockAcquired(
         uint256,
         /* id */ bytes calldata data_
-    ) external poolManagerOnly returns (bytes memory) {
-        PoolManagerCallData memory pMCallData = abi.decode(
+    ) external poolManagerOnly returns (bytes memory o) {
+        /// decode calldata passed through lock()
+        PoolManagerCalldata memory pmCalldata = abi.decode(
             data_,
-            (PoolManagerCallData)
+            (PoolManagerCalldata)
         );
-        // first case mint
-        if (pMCallData.actionType == 0) _lockAcquiredMint(pMCallData);
-        // second case burn action.
-        if (pMCallData.actionType == 1) _lockAcquiredBurn(pMCallData);
-        // third case arb swap action.
-        if (pMCallData.actionType == 2) _lockAcquiredArb(pMCallData);
+
+        /// first case mint action
+        if (pmCalldata.actionType == 0) _lockAcquiredMint(pmCalldata);
+        /// second case burn action
+        if (pmCalldata.actionType == 1) _lockAcquiredBurn(pmCalldata);
+        /// third case arbSwap action
+        if (pmCalldata.actionType == 2) _lockAcquiredArb(pmCalldata);
     }
 
+    /// anyone can call this method to "open the pool" with top of block arb swap.
+    /// no swaps will be processed in a block unless this method is called first in that block.
     function topOfBlockSwap(
         uint256 newSqrtPriceX96_,
         address receiver_
     ) external {
-        
+        /// encode calldata to pass through lock()
         bytes memory data = abi.encode(
-            PoolManagerCallData({
+            PoolManagerCalldata({
                 amount: newSqrtPriceX96_,
                 msgSender: msg.sender,
                 receiver: receiver_,
-                actionType: 2
+                actionType: 2 /// arbSwap action
             })
         );
 
+        /// allow modifyPosition so that positions can be modified during this tx
         _modifyViaHook = true;
+
+        /// begin pool actions (passing data through lock() into _lockAcquiredArb())
         poolManager.lock(data);
+
+        /// disallow modifyPosition so no one else can mint/burn except through hook methods
         _modifyViaHook = false;
     }
 
+    /// how LPs add and remove liquidity into the hook
     function mint(
         uint256 mintAmount_,
         address receiver_
     ) external nonReentrant returns (uint256 amount0, uint256 amount1) {
-        require(mintAmount_ > 0, "mint 0");
+        if (mintAmount_ == 0) revert MintZero();
 
+        /// encode calldata to pass through lock()
         bytes memory data = abi.encode(
-            PoolManagerCallData({
+            PoolManagerCalldata({
                 amount: mintAmount_,
                 msgSender: msg.sender,
                 receiver: receiver_,
-                actionType: 0
+                actionType: 0 /// mint action
             })
         );
 
+        /// state variables to be able to bubble up amount0 and amount1 as return args
         _a0 = _a1 = 0;
         
+        /// allow modifyPosition so that positions can be modified during this tx
         _modifyViaHook = true;
+
+        /// begin pool actions (passing data through lock() into _lockAcquiredMint())
         poolManager.lock(data);
+
+        /// disallow modifyPosition so no one else can mint/burn except through hook methods
         _modifyViaHook = false;
 
+        /// set return arguments (stored during lock callback)
         amount0 = _a0;
         amount1 = _a1;
 
+        /// remit ERC20 liquidity shares to target receiver
         _mint(receiver_, mintAmount_);
     }
 
@@ -241,11 +270,12 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         uint256 burnAmount_,
         address receiver_
     ) external nonReentrant returns (uint256 amount0, uint256 amount1) {
-        require(burnAmount_ > 0, "burn 0");
-        require(totalSupply() > 0, "total supply is 0");
+        if (burnAmount_ == 0) revert BurnZero();
+        if (totalSupply() < burnAmount_) revert BurnOverflow();
 
+        /// encode calldata to pass through lock()
         bytes memory data = abi.encode(
-            PoolManagerCallData({
+            PoolManagerCalldata({
                 amount: burnAmount_,
                 msgSender: msg.sender,
                 receiver: receiver_,
@@ -253,27 +283,40 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             })
         );
 
+        /// state variables to be able to bubble up amount0 and amount1 as return args
         _a0 = _a1 = 0;
 
+        /// allow modifyPosition so that positions can be modified during this tx
         _modifyViaHook = true;
+
+        /// begin pool actions (passing data through lock() into _lockAcquiredBurn())
         poolManager.lock(data);
+
+        /// disallow modifyPosition so no one else can mint/burn except through hook methods
         _modifyViaHook = false;
 
+        /// set return arguments (stored during lock callback)
         amount0 = _a0;
         amount1 = _a1;
 
+        /// burn ERC20 LP shares of the caller
         _burn(msg.sender, burnAmount_);
     }
 
-    function _lockAcquiredArb(PoolManagerCallData memory pMCallData) internal {
+    function _lockAcquiredArb(PoolManagerCalldata memory pmCalldata) internal {
+        /// compute block delta since last time pool was utilized.
         uint256 blockDelta = block.number - lastBlockTouch;
+
+        /// revert if block delta is 0 (pool is already open, top of block arb already happened)
         if (blockDelta == 0) revert NotTopOfBlock();
 
         (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
             PoolIdLibrary.toId(poolKey)
         );
 
-        uint160 newSqrtPriceX96 = SafeCast.toUint160(pMCallData.amount);
+        uint160 newSqrtPriceX96 = SafeCast.toUint160(pmCalldata.amount);
+
+        /// if prices match, nothing to do
         if (sqrtPriceX96 == newSqrtPriceX96) return;
 
         Position.Info memory info = PoolManager(
@@ -285,11 +328,14 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 upperTick
             );
 
+        /// revert arb swap if there's no liquidity in pool
         if (info.liquidity == 0) revert ZeroLiquidity();
 
+        /// compute swap amounts, swap direction, and amount of liquidity to mint
         (uint256 swap0, uint256 swap1, int256 newLiquidity, bool zeroForOne) = 
             _computeArbSwap(sqrtPriceX96, newSqrtPriceX96, info.liquidity, blockDelta);
 
+        /// burn all liquidity
         poolManager.modifyPosition(
             poolKey,
             IPoolManager.ModifyPositionParams({
@@ -301,8 +347,11 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             })
         );
 
+        /// update lastBlockTouch to current block
+        /// must do now or else swap in next line would revert in preswap hook
         lastBlockTouch = block.number;
 
+        /// swap 1 wei in zero liquidity to kick the price to newSqrtPriceX96
         poolManager.swap(
             poolKey, 
             IPoolManager.SwapParams({
@@ -312,6 +361,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             })
         );
 
+        /// mint new liquidity around newSqrtPriceX96
         poolManager.modifyPosition(
             poolKey,
             IPoolManager.ModifyPositionParams({
@@ -321,37 +371,43 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             })
         );
         
+        /// handle swap transfers (send to / transferFrom arber)
         if (zeroForOne) {
+            /// transfer swapInAmt to PoolManager
             ERC20(Currency.unwrap(poolKey.currency0)).safeTransferFrom(
-                pMCallData.msgSender,
+                pmCalldata.msgSender,
                 address(poolManager),
                 swap0
             );
             poolManager.settle(poolKey.currency0);
+            /// transfer swapOutAmt to arber
             poolManager.take(
                 poolKey.currency1,
-                pMCallData.receiver,
+                pmCalldata.receiver,
                 swap1
             );
         } else {
+            /// transfer swapInAmt to PoolManager
             ERC20(Currency.unwrap(poolKey.currency1)).safeTransferFrom(
-                pMCallData.msgSender,
+                pmCalldata.msgSender,
                 address(poolManager),
                 swap1
             );
             poolManager.settle(poolKey.currency1);
+            /// transfer swapOutAmt to arber
             poolManager.take(
                 poolKey.currency0,
-                pMCallData.receiver,
+                pmCalldata.receiver,
                 swap0
             );
         }
 
+        /// if any positive balances remain in PoolManager after all operations (e.g. sidelined vault tokens), mint erc1155 shares (or else tokens will be lost)
         _mintIfLeftOver();
     }
 
-    function _lockAcquiredMint(PoolManagerCallData memory pMCallData) internal {
-        // burn everything positions and erc1155
+    function _lockAcquiredMint(PoolManagerCalldata memory pmCalldata) internal {
+        /// burn everything positions and erc1155 (includes sidelined vault tokens)
 
         uint256 totalSupply = totalSupply();
 
@@ -365,13 +421,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 sqrtPriceX96,
                 sqrtPriceX96A,
                 sqrtPriceX96B,
-                SafeCast.toUint128(pMCallData.amount)
+                SafeCast.toUint128(pmCalldata.amount)
             );
 
             poolManager.modifyPosition(
                 poolKey,
                 IPoolManager.ModifyPositionParams({
-                    liquidityDelta: SafeCast.toInt256(pMCallData.amount),
+                    liquidityDelta: SafeCast.toInt256(pmCalldata.amount),
                     tickLower: lowerTick,
                     tickUpper: upperTick
                 })
@@ -379,7 +435,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             if (_a0 > 0) {
                 ERC20(Currency.unwrap(poolKey.currency0)).safeTransferFrom(
-                    pMCallData.msgSender,
+                    pmCalldata.msgSender,
                     address(poolManager),
                     _a0
                 );
@@ -387,7 +443,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             }
             if (_a1 > 0) {
                 ERC20(Currency.unwrap(poolKey.currency1)).safeTransferFrom(
-                    pMCallData.msgSender,
+                    pmCalldata.msgSender,
                     address(poolManager),
                     _a1
                 );
@@ -460,12 +516,12 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             uint256 currency1Balance = SafeCast.toUint256(currency1BalanceRaw);
 
             uint256 amount0 = FullMath.mulDiv(
-                pMCallData.amount,
+                pmCalldata.amount,
                 currency0Balance,
                 totalSupply
             );
             uint256 amount1 = FullMath.mulDiv(
-                pMCallData.amount,
+                pmCalldata.amount,
                 currency1Balance,
                 totalSupply
             );
@@ -487,7 +543,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             // mint back the position.
 
-            uint256 liquidity = FullMath.mulDiv(pMCallData.amount, info.liquidity, totalSupply);
+            uint256 liquidity = FullMath.mulDiv(pmCalldata.amount, info.liquidity, totalSupply);
 
             if (liquidity > 0)
                 poolManager.modifyPosition(
@@ -502,7 +558,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             // safeTransfer to PoolManager.
             if (amount0 > 0) {
                 ERC20(Currency.unwrap(poolKey.currency0)).safeTransferFrom(
-                    pMCallData.msgSender,
+                    pmCalldata.msgSender,
                     address(poolManager),
                     amount0
                 );
@@ -510,7 +566,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             }
             if (amount1 > 0) {
                 ERC20(Currency.unwrap(poolKey.currency1)).safeTransferFrom(
-                    pMCallData.msgSender,
+                    pmCalldata.msgSender,
                     address(poolManager),
                     amount1
                 );
@@ -521,9 +577,9 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         }
     }
 
-    function _lockAcquiredBurn(PoolManagerCallData memory pMCallData) internal {
+    function _lockAcquiredBurn(PoolManagerCalldata memory pmCalldata) internal {
         {
-            ///@dev burn everything, positions and erc1155
+            /// burn everything, positions and erc1155 (includes sidelined vault tokens)
 
             uint256 totalSupply = totalSupply();
 
@@ -595,12 +651,12 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             {
                 uint256 amount0 = FullMath.mulDiv(
-                    pMCallData.amount,
+                    pmCalldata.amount,
                     currency0Balance,
                     totalSupply
                 );
                 uint256 amount1 = FullMath.mulDiv(
-                    pMCallData.amount,
+                    pmCalldata.amount,
                     currency1Balance,
                     totalSupply
                 );
@@ -609,14 +665,14 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 if (amount0 > 0) {
                     poolManager.take(
                         poolKey.currency0,
-                        pMCallData.receiver,
+                        pmCalldata.receiver,
                         amount0
                     );
                 }
                 if (amount1 > 0) {
                     poolManager.take(
                         poolKey.currency1,
-                        pMCallData.receiver,
+                        pmCalldata.receiver,
                         amount1
                     );
                 }
@@ -640,7 +696,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             currency1Balance = SafeCast.toUint256(currency1BalanceRaw);
 
             {
-                uint256 liquidity = uint256(info.liquidity) - FullMath.mulDiv(pMCallData.amount, info.liquidity, totalSupply);
+                uint256 liquidity = uint256(info.liquidity) - FullMath.mulDiv(pmCalldata.amount, info.liquidity, totalSupply);
 
                 if (liquidity > 0)
                     poolManager.modifyPosition(
@@ -684,12 +740,15 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         uint128 liquidity,
         uint256 blockDelta
     ) internal view returns (uint256, uint256, int256, bool) {
-        uint256 subtract = (blockDelta-1)*decayRate;
-        uint16 factor = subtract >= baseBeta ? 10000: 10000 - (baseBeta - uint16(subtract));
+        /// if blockDelta = 1 then subtract 0; if blockDelta = 2 then subtract decayRate; if blockDelta = 3 then subtract 2*decayRate etc.
+        uint256 subtractAmt = (blockDelta-1)*decayRate;
+        /// baseBeta - subtractAmt
+        uint16 factor = subtractAmt >= baseBeta ? 10000: 10000 - (baseBeta - uint16(subtractAmt));
 
         uint160 sqrtPriceX96A = TickMath.getSqrtRatioAtTick(lowerTick);
         uint160 sqrtPriceX96B = TickMath.getSqrtRatioAtTick(upperTick);
 
+        /// get amount0/1 of current liquidity
         (uint256 current0, uint256 current1) = LiquidityAmounts.getAmountsForLiquidity(
             sqrtPriceX96,
             sqrtPriceX96A,
@@ -697,6 +756,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             liquidity
         );
 
+        /// get amount0/1 of current liquidity if price was newSqrtPriceX96
         (uint256 new0, uint256 new1) = LiquidityAmounts.getAmountsForLiquidity(
             newSqrtPriceX96,
             sqrtPriceX96A,
@@ -705,12 +765,20 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         );
         bool zeroForOne = new0 > current0;
         
+        /// differential of info.liquidity amount0/1 at those two prices gives X and Y of classic UniV2 swap
+        /// to get (1-Beta)*X and (1-Beta)*Y for our swap apply `factor`
         uint256 swap0 = FullMath.mulDiv(zeroForOne ? new0 - current0 : current0 - new0, factor, 10000);
         uint256 swap1 = FullMath.mulDiv(zeroForOne ? current1 - new1 : new1 - current1, factor, 10000);
+
+        /// here we apply the swap amounts to the current liquidity and also the 1 wei we burn to kick the price
+        /// to get amounts available to use as liquidity after the arb swap operation
+        /// NOTE for now this assumes positions always in range and never 0, zeros could cause problems
         uint256 finalLiq0 = zeroForOne ? current0 + swap0 - 1 : current0 - swap0;
         uint256 finalLiq1 = zeroForOne ? current1 - swap1 : current1 + swap1 - 1;
 
-        liquidity = LiquidityAmounts.getLiquidityForAmounts(
+        /// here we compute the newLiquidity we can mint after the arb swap operation
+        /// this should be less than previous info.liquidity by `C`, leaving some leftover in one token
+        uint128 newLiquidity = LiquidityAmounts.getLiquidityForAmounts(
             newSqrtPriceX96,
             sqrtPriceX96A,
             sqrtPriceX96B,
@@ -718,6 +786,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             finalLiq1
         );
 
-        return (swap0, swap1, SafeCast.toInt256(uint256(liquidity)), zeroForOne);
+        return (swap0, swap1, SafeCast.toInt256(uint256(newLiquidity)), zeroForOne);
     }
 }
