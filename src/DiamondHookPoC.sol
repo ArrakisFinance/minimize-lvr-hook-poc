@@ -10,6 +10,7 @@ import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.s
 import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/types/PoolId.sol";
 import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/contracts/types/BalanceDelta.sol";
+import {FeeLibrary} from "@uniswap/v4-core/contracts/libraries/FeeLibrary.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/contracts/types/Currency.sol";
 import {FullMath} from "@uniswap/v4-core/contracts/libraries/FullMath.sol";
 import {TickMath} from "@uniswap/v4-core/contracts/libraries/TickMath.sol";
@@ -27,6 +28,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using BalanceDeltaLibrary for BalanceDelta;
+    using FeeLibrary for uint24;
     using TickMath for int24;
     using Pool for Pool.State;
     using SafeERC20 for ERC20;
@@ -36,12 +38,16 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     error NotPoolManagerToken();
     error OnlyModifyViaHook();
     error InvalidTickBounds();
+    error InvalidMsgValue();
     error NotTopOfBlock();
-    error InvalidTopOfBlockSwap();
+    error MissingTopOfBlockSwap();
     error InsufficientLiquidity();
+    error InsufficientHedgeCommitment();
     error MintZero();
     error BurnZero();
     error BurnOverflow();
+    error WithdrawOverflow();
+    error NotCommitter();
 
     uint16 internal constant _BPS = 10000;
 
@@ -57,8 +63,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     /// ----------
 
     uint256 public lastBlockTouch;
-    uint256 public sqrtPriceCommitment;
+    uint256 public hedgeCommitment0;
+    uint256 public hedgeCommitment1;
+    uint256 public hedgeRequired0;
+    uint256 public hedgeRequired1;
+    uint160 public sqrtPriceCommitment;
     PoolKey public poolKey;
+    address public committer;
     bool public initialized;
 
     struct PoolManagerCalldata {
@@ -170,17 +181,56 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         returns (bytes4)
     {
         /// disallow normal swaps at top of block
-        if (lastBlockTouch != block.number) revert InvalidTopOfBlockSwap();
+        if (lastBlockTouch != block.number) revert MissingTopOfBlockSwap();
         return BaseHook.beforeSwap.selector;
     }
 
-    function afterSwap(address, PoolKey calldata, IPoolManager.SwapParams calldata, BalanceDelta)
+    function afterSwap(address, PoolKey calldata, IPoolManager.SwapParams calldata, BalanceDelta delta)
         external
-        pure
         override
         returns (bytes4)
     {
-        /// TODO check hedger invariant after all swaps
+        (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
+            PoolIdLibrary.toId(poolKey)
+        );
+
+        if (sqrtPriceX96 != sqrtPriceCommitment) {
+            Position.Info memory info = PoolManager(
+                payable(address(poolManager))
+            ).getPosition(
+                    PoolIdLibrary.toId(poolKey),
+                    address(this),
+                    lowerTick,
+                    upperTick
+                );
+
+            uint160 sqrtPriceX96A = TickMath.getSqrtRatioAtTick(lowerTick);
+            uint160 sqrtPriceX96B = TickMath.getSqrtRatioAtTick(upperTick);
+            
+            (uint256 current0, uint256 current1) = LiquidityAmounts.getAmountsForLiquidity(
+                sqrtPriceX96,
+                sqrtPriceX96A,
+                sqrtPriceX96B,
+                info.liquidity
+            );
+            
+
+            (uint256 desired0, uint256 desired1) = LiquidityAmounts.getAmountsForLiquidity(
+                sqrtPriceCommitment,
+                sqrtPriceX96A,
+                sqrtPriceX96B,
+                info.liquidity
+            );
+
+            hedgeRequired0 = desired0 > current0 ? desired0 + 1 - current0 : 0;
+            hedgeRequired1 = desired1 > current1 ? desired1 + 1 - current1 : 0;
+
+            if (hedgeRequired0 > hedgeCommitment0 || hedgeRequired1 > hedgeCommitment1) revert InsufficientHedgeCommitment();
+        } else {
+            hedgeRequired0 = 0;
+            hedgeRequired1 = 0;
+        }
+
         return BaseHook.afterSwap.selector;
     }
 
@@ -216,16 +266,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     /// anyone can call this method to "open the pool" with top of block arb swap.
     /// no swaps will be processed in a block unless this method is called first in that block.
-    function topOfBlockSwap(
-        uint256 newSqrtPriceX96_,
-        address receiver_
-    ) external payable nonReentrant {
+    function topOfBlockSwap(uint160 newSqrtPriceX96_) external payable nonReentrant {
         /// encode calldata to pass through lock()
         bytes memory data = abi.encode(
             PoolManagerCalldata({
-                amount: newSqrtPriceX96_,
+                amount: uint256(newSqrtPriceX96_),
                 msgSender: msg.sender,
-                receiver: receiver_,
+                receiver: msg.sender,
                 actionType: 2 /// arbSwap action
             })
         );
@@ -233,14 +280,73 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         /// begin pool actions (passing data through lock() into _lockAcquiredArb())
         poolManager.lock(data);
 
+        committer = msg.sender;
+        sqrtPriceCommitment = newSqrtPriceX96_;
+
         /// handle eth refunds
         if (poolKey.currency0.isNative()) {
-            uint256 bal = address(this).balance;
-            if (bal > 0) _nativeTransfer(msg.sender, bal);
+            uint256 leftover = address(this).balance;
+            if (leftover > 0) _nativeTransfer(msg.sender, leftover);
         }
         if (poolKey.currency1.isNative()) {
-            uint256 bal = address(this).balance;
-            if (bal > 0) _nativeTransfer(msg.sender, bal);
+            uint256 leftover = address(this).balance;
+            if (leftover > 0) _nativeTransfer(msg.sender, leftover);
+        }
+    }
+
+    function depositHedgeCommiment(uint256 amount0, uint256 amount1) external payable {
+        if (lastBlockTouch != block.number) revert MissingTopOfBlockSwap();
+        if (amount0 > 0) {
+            if (poolKey.currency0.isNative()) {
+                if (msg.value != amount0) revert InvalidMsgValue();
+            } else {
+                ERC20(Currency.unwrap(poolKey.currency0)).safeTransferFrom(
+                    msg.sender,
+                    address(this),
+                    amount0
+                );
+            }
+            hedgeCommitment0 += amount0;
+        }
+        if (amount1 > 0) {
+            if (poolKey.currency1.isNative()) {
+                if (msg.value != amount1) revert InvalidMsgValue();
+            } else {
+                ERC20(Currency.unwrap(poolKey.currency1)).safeTransferFrom(
+                    msg.sender,
+                    address(this),
+                    amount1
+                );
+            }
+            hedgeCommitment1 += amount1;
+        }
+    }
+
+    function withdrawHedgeCommitment(uint256 amount0, uint256 amount1) external {
+        if (committer != msg.sender) revert NotCommitter();
+        if (amount0 > 0) {
+            uint256 withdrawAvailable0 = hedgeCommitment0 - hedgeRequired0;
+            if (amount0 > withdrawAvailable0) revert WithdrawOverflow();
+            if (poolKey.currency0.isNative()) {
+                _nativeTransfer(msg.sender, amount0);
+            } else {
+                ERC20(Currency.unwrap(poolKey.currency0)).safeTransfer(
+                    msg.sender,
+                    amount0
+                );
+            }
+        }
+        if (amount1 > 0) {
+            uint256 withdrawAvailable1 = hedgeCommitment1 - hedgeRequired1;
+            if (amount1 > withdrawAvailable1) revert WithdrawOverflow();
+            if (poolKey.currency1.isNative()) {
+                _nativeTransfer(msg.sender, amount1);
+            } else {
+                ERC20(Currency.unwrap(poolKey.currency1)).safeTransfer(
+                    msg.sender,
+                    amount1
+                );
+            }
         }
     }
 
@@ -269,12 +375,12 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
         /// handle eth refunds
         if (poolKey.currency0.isNative()) {
-            uint256 bal = address(this).balance;
-            if (bal > 0) _nativeTransfer(msg.sender, bal);
+            uint256 leftover = address(this).balance - hedgeCommitment0;
+            if (leftover > 0) _nativeTransfer(msg.sender, leftover);
         }
         if (poolKey.currency1.isNative()) {
-            uint256 bal = address(this).balance;
-            if (bal > 0) _nativeTransfer(msg.sender, bal);
+            uint256 leftover = address(this).balance - hedgeCommitment1;
+            if (leftover > 0) _nativeTransfer(msg.sender, leftover);
         }
 
         /// set return arguments (stored during lock callback)
@@ -318,6 +424,9 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     function _lockAcquiredArb(PoolManagerCalldata memory pmCalldata) internal {
         uint256 blockDelta = _requireTopOfBlock();
+
+        // TODO
+        _clearHedger();
 
         (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
             PoolIdLibrary.toId(poolKey)
@@ -735,6 +844,10 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         _mintIfLeftOver();
     }
 
+    function _clearHedger() internal {
+        // TODO move price back to commitment price and 
+    }
+
     function _mintIfLeftOver() internal {
         int256 currency0BalanceRaw = poolManager.currencyDelta(address(this), poolKey.currency0);
         if (currency0BalanceRaw > 0) {
@@ -838,7 +951,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             finalLiq1
         )));
 
-        /// here we force arber to always input 1 extra wei into the swap, which is used to kick the price
+        /// here we force arber to always input 1 extra wei into the swapInAmount, which ends up getting burned to kick the price in 0 liquidity
         if (zeroForOne) {
             swap0 += 1;
         } else {
