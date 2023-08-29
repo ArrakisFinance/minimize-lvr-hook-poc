@@ -595,7 +595,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             _clear1155Balances();
 
-            // check locker balances.
             (uint256 currency0Balance, uint256 currency1Balance) = _checkCurrencyBalances();
 
             uint256 amount0 = FullMath.mulDiv(
@@ -680,7 +679,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
         _clear1155Balances();
 
-        // check locker balances.
         (uint256 currency0Balance, uint256 currency1Balance) = _checkCurrencyBalances();
 
         uint256 amount0 = FullMath.mulDiv(
@@ -805,22 +803,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     }
 
     function _mintLeftover() internal {
-        int256 currency0BalanceRaw = poolManager.currencyDelta(address(this), poolKey.currency0);
-        if (currency0BalanceRaw > 0) {
-            revert("delta currency0 cannot be positive");
-        }
-        uint256 leftOver0 = SafeCast.toUint256(-currency0BalanceRaw);
-        int256 currency1BalanceRaw = poolManager.currencyDelta(address(this), poolKey.currency1);
-        if (currency1BalanceRaw > 0) {
-            revert("delta currency1 cannot be positive");
-        }
-        uint256 leftOver1 = SafeCast.toUint256(-currency1BalanceRaw);
+        (uint256 currencyBalance0, uint256 currencyBalance1) = _checkCurrencyBalances();
 
-        if (leftOver0 > 0) {
-            poolManager.mint(poolKey.currency0, address(this), leftOver0);
+        if (currencyBalance0 > 0) {
+            poolManager.mint(poolKey.currency0, address(this), currencyBalance0);
         }
-        if (leftOver1 > 0) {
-            poolManager.mint(poolKey.currency1, address(this), leftOver1);
+        if (currencyBalance1 > 0) {
+            poolManager.mint(poolKey.currency1, address(this), currencyBalance1);
         }
     }
 
@@ -893,7 +882,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     }
 
     function _getResetPriceAndLiquidity(
-        uint160 sqrtPriceCommitment,
+        uint160 sqrtPriceCommitted,
         uint128 currentLiquidity
     ) internal view returns (uint160, int256) {
         (uint256 totalHoldings0, uint256 totalHoldings1) = _checkCurrencyBalances();
