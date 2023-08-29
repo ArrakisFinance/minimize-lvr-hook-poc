@@ -34,12 +34,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     error AlreadyInitialized();
     error NotPoolManagerToken();
-    error InvalidTickBounds();
+    error InvalidTickSpacing();
     error InvalidMsgValue();
     error OnlyModifyViaHook();
-    error NotTopOfBlock();
-    error MissingTopOfBlockSwap();
-    error InsufficientLiquidity();
+    error PoolAlreadyOpened();
+    error PoolNotOpen();
+    error ArbTooSmall();
+    error LiquidityZero();
     error InsufficientHedgeCommitment();
     error MintZero();
     error BurnZero();
@@ -48,21 +49,22 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     error OnlyCommitter();
     error SwapOutOfBounds();
 
-    uint16 internal constant _BPS = 10000;
+    uint24 internal constant _PIPS = 1000000;
 
     int24 public immutable lowerTick;
     int24 public immutable upperTick;
-    uint16 public immutable baseBeta;
-    uint16 public immutable decayRate;
-    uint16 public immutable vaultRedepositRate;
+    int24 public immutable tickSpacing;
+    uint24 public immutable baseBeta; // % expressed as uint < 1e6
+    uint24 public immutable decayRate; // % expressed as uint < 1e6
+    uint24 public immutable vaultRedepositRate; // % expressed as uint < 1e6
 
     /// @dev these could be TRANSIENT STORAGE eventually
     uint256 internal _a0;
     uint256 internal _a1;
     /// ----------
 
-    uint256 public lastBlockTouch;
-    uint256 public lastBlockCleared;
+    uint256 public lastBlockOpened;
+    uint256 public lastBlockReset;
     int256 public hedgeRequired0;
     int256 public hedgeRequired1;
     uint160 public sqrtPriceCommitment;
@@ -85,20 +87,20 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         uint160 sqrtPriceX96A;
         uint160 sqrtPriceX96B;
         uint128 liquidity;
-        uint16 betaFactor;
+        uint24 betaFactor;
     }
 
     constructor(
         IPoolManager _poolManager,
-        int24 _lowerTick,
-        int24 _upperTick,
-        uint16 _baseBeta,
-        uint16 _decayRate,
-        uint16 _vaultRedepositRate
+        int24 _tickSpacing,
+        uint24 _baseBeta,
+        uint24 _decayRate,
+        uint24 _vaultRedepositRate
     ) BaseHook(_poolManager) ERC20("Diamond LP Token", "DLPT") {
-        lowerTick = _lowerTick;
-        upperTick = _upperTick;
-        require(_baseBeta < _BPS && _decayRate <= _baseBeta && _vaultRedepositRate < _BPS);
+        lowerTick = _tickSpacing.minUsableTick();
+        upperTick = _tickSpacing.maxUsableTick();
+        tickSpacing = _tickSpacing;
+        require(_baseBeta < _PIPS && _decayRate <= _baseBeta && _vaultRedepositRate < _PIPS);
         baseBeta = _baseBeta;
         decayRate = _decayRate;
         vaultRedepositRate = _vaultRedepositRate;
@@ -161,18 +163,14 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         if (initialized) revert AlreadyInitialized();
 
         /// validate tick bounds on pool initialization
-        if (
-            lowerTick % poolKey_.tickSpacing != 0 || 
-            upperTick % poolKey_.tickSpacing != 0 || 
-            lowerTick < poolKey_.tickSpacing.minUsableTick() || 
-            upperTick > poolKey_.tickSpacing.maxUsableTick()
-        ) revert InvalidTickBounds();
+        if (poolKey_.tickSpacing != tickSpacing) revert InvalidTickSpacing();
 
         /// initialize state variable
         poolKey = poolKey_;
-        lastBlockTouch = block.number;
-        initialized = true;
+        lastBlockOpened = block.number-1;
+        lastBlockReset = block.number;
         sqrtPriceCommitment = sqrtPriceX96;
+        initialized = true;
 
         return this.beforeInitialize.selector;
     }
@@ -186,7 +184,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         /// if swap is coming from the hook then its a 1 wei swap to kick the price and not a "normal" swap
         if (sender != address(this)) {
             /// disallow normal swaps at top of block
-            if (lastBlockTouch != block.number) revert MissingTopOfBlockSwap();
+            if (lastBlockOpened != block.number) revert PoolNotOpen();
         }
         return BaseHook.beforeSwap.selector;
     }
@@ -198,11 +196,11 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     {
         /// if swap is coming from the hook then its a 1 wei swap to kick the price and not a "normal" swap
         if (sender != address(this)) {
-            /// check that swap does not go to edge of our position - NOTE may not be strictly necessary and could save gas to remove
-            (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
+            /// cannot move price to edge of LP positin
+            (, int24 tick, , , , ) = poolManager.getSlot0(
                 PoolIdLibrary.toId(poolKey)
             );
-            if (sqrtPriceX96 >= TickMath.getSqrtRatioAtTick(upperTick) || sqrtPriceX96 <= TickMath.getSqrtRatioAtTick(lowerTick)) revert SwapOutOfBounds();
+            if (tick >= upperTick || tick <= lowerTick) revert SwapOutOfBounds();
             
             /// NOTE this assumes static fees !!!
             uint24 fee = poolKey.fee.getStaticFee();
@@ -210,11 +208,11 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             /// infer swap direction
             bool zeroForOne = delta.amount0() < 0;
             if (zeroForOne) {
-                int256 amount0LessFee = SafeCast.toInt256(FullMath.mulDiv(uint128(-delta.amount0()), 1e6 - fee, 1e6));
+                int256 amount0LessFee = SafeCast.toInt256(FullMath.mulDiv(uint128(-delta.amount0()), _PIPS - fee, _PIPS));
                 hedgeRequired0 -= amount0LessFee;
                 hedgeRequired1 += int256(delta.amount1());
             } else {
-                int256 amount1LessFee = SafeCast.toInt256(FullMath.mulDiv(uint128(-delta.amount1()), 1e6 - fee, 1e6));
+                int256 amount1LessFee = SafeCast.toInt256(FullMath.mulDiv(uint128(-delta.amount1()), _PIPS - fee, _PIPS));
                 hedgeRequired1 -= amount1LessFee;
                 hedgeRequired0 += int256(delta.amount0());
             }
@@ -265,7 +263,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     /// anyone can call this method to "open the pool" with top of block arb swap.
     /// no swaps will be processed in a block unless this method is called first in that block.
-    function topOfBlockSwap(uint160 newSqrtPriceX96_) external payable nonReentrant {
+    function openPool(uint160 newSqrtPriceX96_) external payable nonReentrant {
         /// encode calldata to pass through lock()
         bytes memory data = abi.encode(
             PoolManagerCalldata({
@@ -281,7 +279,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
         committer = msg.sender;
         sqrtPriceCommitment = newSqrtPriceX96_;
-        lastBlockTouch = block.number;
+        lastBlockOpened = block.number;
 
         /// handle eth refunds (question: may not be necessary as block producer should know exactly the amount of eth needed ??)
         if (poolKey.currency0.isNative()) {
@@ -295,7 +293,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     }
 
     function depositHedgeCommitment(uint128 amount0, uint128 amount1) external payable {
-        if (lastBlockTouch != block.number) revert MissingTopOfBlockSwap();
+        if (lastBlockOpened != block.number) revert PoolNotOpen();
 
         if (amount0 > 0) {
             if (poolKey.currency0.isNative()) {
@@ -324,12 +322,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         }
     }
 
-    function withdrawHedgeCommitment(uint256 amount0, uint256 amount1) external {
+    function withdrawHedgeCommitment(uint128 amount0, uint128 amount1) external nonReentrant {
         if (committer != msg.sender) revert OnlyCommitter();
 
         if (amount0 > 0) {
             uint256 withdrawAvailable0 = hedgeRequired0 > 0 ? hedgeCommitment0 - uint256(hedgeRequired0) - 1 : hedgeCommitment0;
             if (amount0 > withdrawAvailable0) revert WithdrawExceedsAvailable();
+            hedgeCommitment0 -= amount0;
             if (poolKey.currency0.isNative()) {
                 _nativeTransfer(msg.sender, amount0);
             } else {
@@ -343,6 +342,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         if (amount1 > 0) {
             uint256 withdrawAvailable1 = hedgeRequired1 > 0 ? hedgeCommitment1 - uint256(hedgeRequired1) - 1 : hedgeCommitment1;
             if (amount1 > withdrawAvailable1) revert WithdrawExceedsAvailable();
+            hedgeCommitment1 -= amount1;
             if (poolKey.currency1.isNative()) {
                 _nativeTransfer(msg.sender, amount1);
             } else {
@@ -427,9 +427,9 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     }
 
     function _lockAcquiredArb(PoolManagerCalldata memory pmCalldata) internal {
-        uint256 blockDelta = _requireTopOfBlock();
+        uint256 blockDelta = _checkLastOpen();
 
-        _clearHedger();
+        _resetLiquidity();
 
         (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
             PoolIdLibrary.toId(poolKey)
@@ -525,11 +525,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     }
 
     function _lockAcquiredMint(PoolManagerCalldata memory pmCalldata) internal {
-        /// if this is first touch in this block, then we need to clearHedger() first.
         uint256 totalSupply = totalSupply();
-        if (lastBlockTouch != block.number && totalSupply > 0) {
-            _clearHedger();
-        }
 
         if (totalSupply == 0) {
             (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
@@ -572,6 +568,9 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 poolManager.settle(poolKey.currency1);
             }
         } else {
+            /// if this is first touch in this block, then we need to _resetLiquidity() first
+            if (lastBlockOpened != block.number) _resetLiquidity();
+
             /// burn everything positions and erc1155
             Position.Info memory info = PoolManager(
                 payable(address(poolManager))
@@ -651,8 +650,8 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     function _lockAcquiredBurn(PoolManagerCalldata memory pmCalldata) internal {
         /// if this is first touch in this block, then we need to clearHedger() first.
-        if (lastBlockTouch != block.number) {
-            _clearHedger();
+        if (lastBlockOpened != block.number) {
+            _resetLiquidity();
         }
 
         /// burn everything, positions and erc1155
@@ -729,8 +728,8 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         _mintLeftover();
     }
 
-    function _clearHedger() internal {
-        if (lastBlockCleared != block.number) {
+    function _resetLiquidity() internal {
+        if (lastBlockReset != block.number) {
             (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
                 PoolIdLibrary.toId(poolKey)
             );
@@ -757,44 +756,27 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             _clear1155Balances();
 
-            /// swap 1 wei in zero liquidity to kick the price to sqrtPriceCommitment
-            if (sqrtPriceX96 != sqrtPriceCommitment)
-                poolManager.swap(
-                    poolKey,
-                    IPoolManager.SwapParams({
-                        zeroForOne: sqrtPriceCommitment < sqrtPriceX96,
-                        amountSpecified: 1,
-                        sqrtPriceLimitX96: sqrtPriceCommitment
-                    })
-                );
-
-            uint160 sqrtPriceX96A = TickMath.getSqrtRatioAtTick(lowerTick);
-            uint160 sqrtPriceX96B = TickMath.getSqrtRatioAtTick(upperTick);
-            (uint256 l0, uint256 l1) = LiquidityAmounts.getAmountsForLiquidity(
+            (uint160 newSqrtPrice, int256 newLiquidity) = _getResetPriceAndLiquidity(
                 sqrtPriceCommitment,
-                sqrtPriceX96A,
-                sqrtPriceX96B,
                 info.liquidity
             );
 
-            // check locker balances.
-            (uint256 currency0Balance, uint256 currency1Balance) = _checkCurrencyBalances();
+            /// swap 1 wei in zero liquidity to kick the price to sqrtPriceCommitment
+            if (sqrtPriceX96 != newSqrtPrice)
+                poolManager.swap(
+                    poolKey,
+                    IPoolManager.SwapParams({
+                        zeroForOne: newSqrtPrice < sqrtPriceX96,
+                        amountSpecified: 1,
+                        sqrtPriceLimitX96: newSqrtPrice
+                    })
+                );
 
-            uint256 redeposit0 = l0 + FullMath.mulDiv(currency0Balance-l0, vaultRedepositRate, _BPS);
-            uint256 redeposit1 = l1 + FullMath.mulDiv(currency1Balance-l1, vaultRedepositRate, _BPS);
-
-            uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-                sqrtPriceCommitment,
-                sqrtPriceX96A,
-                sqrtPriceX96B,
-                redeposit0,
-                redeposit1
-            );
-            if (info.liquidity > 0)
+            if (newLiquidity > 0)
                 poolManager.modifyPosition(
                     poolKey,
                     IPoolManager.ModifyPositionParams({
-                        liquidityDelta: SafeCast.toInt256(uint256(liquidity)),
+                        liquidityDelta: SafeCast.toInt256(uint256(newLiquidity)),
                         tickLower: lowerTick,
                         tickUpper: upperTick
                     })
@@ -816,7 +798,9 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             hedgeRequired1 = 0;
             hedgeCommitment0 = 0;
             hedgeCommitment1 = 0;
-            lastBlockCleared = block.number;
+
+            // store reset
+            lastBlockReset = block.number;
         }
     }
 
@@ -908,6 +892,15 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         return (currency0Balance, currency1Balance);
     }
 
+    function _getResetPriceAndLiquidity(
+        uint160 sqrtPriceCommitment,
+        uint128 currentLiquidity
+    ) internal view returns (uint160, int256) {
+        (uint256 totalHoldings0, uint256 totalHoldings1) = _checkCurrencyBalances();
+        /// TODO UniV2 algo to compute new price to move to and new liquidity amount to mint
+        return (0, 0);
+    }
+
     function _getArbSwap(
         uint160 sqrtPriceX96,
         uint160 newSqrtPriceX96,
@@ -927,6 +920,9 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     }
 
     function _computeArbSwap(ComputeArbParams memory params) internal pure returns (uint256 swap0, uint256 swap1, int256 newLiquidity, bool zeroForOne) {
+        /// cannot move price to edge of LP positin
+        if (params.newSqrtPriceX96 >= params.sqrtPriceX96B || params.newSqrtPriceX96 <= params.sqrtPriceX96B) revert SwapOutOfBounds();
+        
         /// get amount0/1 of current liquidity
         (uint256 current0, uint256 current1) = LiquidityAmounts.getAmountsForLiquidity(
             params.sqrtPriceX96,
@@ -944,13 +940,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             params.liquidity
         );
     
-        if (new0 == 0 || new1 == 0 || current0 == 0 || current1 == 0 || new0 == current0 || new1 == current1) revert InsufficientLiquidity();
+        if (new0 == current0 || new1 == current1) revert ArbTooSmall();
         zeroForOne = new0 > current0;
         
         /// differential of info.liquidity amount0/1 at those two prices gives X and Y of classic UniV2 swap
         /// to get (1-Beta)*X and (1-Beta)*Y for our swap apply `factor`
-        swap0 = FullMath.mulDiv(zeroForOne ? new0 - current0 : current0 - new0, params.betaFactor, _BPS);
-        swap1 = FullMath.mulDiv(zeroForOne ? current1 - new1 : new1 - current1, params.betaFactor, _BPS);
+        swap0 = FullMath.mulDiv(zeroForOne ? new0 - current0 : current0 - new0, params.betaFactor, _PIPS);
+        swap1 = FullMath.mulDiv(zeroForOne ? current1 - new1 : new1 - current1, params.betaFactor, _PIPS);
 
 
         /// here we apply the swap amounts to the current liquidity
@@ -968,7 +964,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             finalLiq1
         )));
 
-        if (newLiquidity == 0) revert InsufficientLiquidity();
+        if (newLiquidity == 0) revert LiquidityZero();
 
         /// here we force arber to always input 1 extra wei into the swapInAmount, which ends up getting burned to kick the price in 0 liquidity
         if (zeroForOne) {
@@ -978,21 +974,21 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         }
     }
 
-    function _getBeta(uint256 blockDelta) internal view returns (uint16) {
+    function _getBeta(uint256 blockDelta) internal view returns (uint24) {
         /// if blockDelta = 1 then decay is 0; if blockDelta = 2 then decay is decayRate; if blockDelta = 3 then decay is 2*decayRate etc.
         uint256 decayAmt = (blockDelta-1)*decayRate;
         /// decayAmt downcast is safe here because we know baseBeta < 10000
-        uint16 subtractAmt = decayAmt >= baseBeta ? 0 : baseBeta - uint16(decayAmt);
+        uint24 subtractAmt = decayAmt >= baseBeta ? 0 : baseBeta - uint24(decayAmt);
 
-        return _BPS - subtractAmt;
+        return _PIPS - subtractAmt;
     }
 
-    function _requireTopOfBlock() internal view returns (uint256) {
+    function _checkLastOpen() internal view returns (uint256) {
         /// compute block delta since last time pool was utilized.
-        uint256 blockDelta = block.number - lastBlockTouch;
+        uint256 blockDelta = block.number - lastBlockOpened;
 
         /// revert if block delta is 0 (pool is already open, top of block arb already happened)
-        if (blockDelta == 0) revert NotTopOfBlock();
+        if (blockDelta == 0) revert PoolAlreadyOpened();
 
         return blockDelta;
     }
