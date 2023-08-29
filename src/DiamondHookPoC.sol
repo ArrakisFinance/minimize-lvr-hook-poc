@@ -754,19 +754,19 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             _clear1155Balances();
 
-            (uint160 newSqrtPrice, int256 newLiquidity) = _getResetPriceAndLiquidity(
+            (uint160 newSqrtPriceX96, int256 newLiquidity) = _getResetPriceAndLiquidity(
                 sqrtPriceCommitment,
                 info.liquidity
             );
 
             /// swap 1 wei in zero liquidity to kick the price to sqrtPriceCommitment
-            if (sqrtPriceX96 != newSqrtPrice)
+            if (sqrtPriceX96 != newSqrtPriceX96)
                 poolManager.swap(
                     poolKey,
                     IPoolManager.SwapParams({
-                        zeroForOne: newSqrtPrice < sqrtPriceX96,
+                        zeroForOne: newSqrtPriceX96 < sqrtPriceX96,
                         amountSpecified: 1,
-                        sqrtPriceLimitX96: newSqrtPrice
+                        sqrtPriceLimitX96: newSqrtPriceX96
                     })
                 );
 
