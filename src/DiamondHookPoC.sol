@@ -47,7 +47,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     error BurnExceedsSupply();
     error WithdrawExceedsAvailable();
     error OnlyCommitter();
-    error SwapOutOfBounds();
+    error PriceOutOfBounds();
 
     uint24 internal constant _PIPS = 1000000;
 
@@ -200,7 +200,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             (, int24 tick, , , , ) = poolManager.getSlot0(
                 PoolIdLibrary.toId(poolKey)
             );
-            if (tick >= upperTick || tick <= lowerTick) revert SwapOutOfBounds();
+            if (tick >= upperTick || tick <= lowerTick) revert PriceOutOfBounds();
             
             /// NOTE this assumes static fees !!!
             uint24 fee = poolKey.fee.getStaticFee();
@@ -754,10 +754,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             _clear1155Balances();
 
-            (uint160 newSqrtPriceX96, int256 newLiquidity) = _getResetPriceAndLiquidity(
-                sqrtPriceCommitment,
-                info.liquidity
-            );
+            (uint160 newSqrtPriceX96, int256 newLiquidity) = _getResetPriceAndLiquidity(sqrtPriceCommitment);
 
             /// swap 1 wei in zero liquidity to kick the price to sqrtPriceCommitment
             if (sqrtPriceX96 != newSqrtPriceX96)
@@ -881,13 +878,43 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         return (currency0Balance, currency1Balance);
     }
 
-    function _getResetPriceAndLiquidity(
-        uint160 sqrtPriceCommitted,
-        uint128 currentLiquidity
-    ) internal view returns (uint160, int256) {
+    function _getResetPriceAndLiquidity(uint160 sqrtPriceCommitted) internal view returns (uint160, int256) {
         (uint256 totalHoldings0, uint256 totalHoldings1) = _checkCurrencyBalances();
-        /// TODO UniV2 algo to compute new price to move to and new liquidity amount to mint
-        return (0, 0);
+        
+        uint160 sqrtPriceX96A = TickMath.getSqrtRatioAtTick(lowerTick);
+        uint160 sqrtPriceX96B = TickMath.getSqrtRatioAtTick(upperTick);
+
+        (uint256 maxLiquidity0, uint256 maxLiquidity1) = LiquidityAmounts.getAmountsForLiquidity(
+            sqrtPriceCommitted,
+            sqrtPriceX96A,
+            sqrtPriceX96B,
+            LiquidityAmounts.getLiquidityForAmounts(
+                sqrtPriceCommitted,
+                sqrtPriceX96A,
+                sqrtPriceX96B,
+                totalHoldings0,
+                totalHoldings1
+            )
+        );
+
+        /// NOTE one of these should be roughly zero but we don't know which one so we'll just increase both
+        uint256 extra0 = FullMath.mulDiv(totalHoldings0 - maxLiquidity0, vaultRedepositRate, _PIPS);
+        uint256 extra1 = FullMath.mulDiv(totalHoldings1 - maxLiquidity1, vaultRedepositRate, _PIPS);
+
+        uint256 priceX96 = FullMath.mulDiv(maxLiquidity1 + extra1, 1 << 96, maxLiquidity0 + extra0);
+        uint160 finalSqrtPriceX96 = SafeCast.toUint160(_sqrt(priceX96) * (1 << 48));
+
+        if (finalSqrtPriceX96 >= sqrtPriceX96B || finalSqrtPriceX96 <= sqrtPriceX96A) revert PriceOutOfBounds();
+
+        int256 finalLiquidity = SafeCast.toInt256(uint256(LiquidityAmounts.getLiquidityForAmounts(
+            finalSqrtPriceX96,
+            sqrtPriceX96A,
+            sqrtPriceX96B,
+            totalHoldings0,
+            totalHoldings1
+        )));
+
+        return (finalSqrtPriceX96, finalLiquidity);
     }
 
     function _getArbSwap(
@@ -910,7 +937,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     function _computeArbSwap(ComputeArbParams memory params) internal pure returns (uint256 swap0, uint256 swap1, int256 newLiquidity, bool zeroForOne) {
         /// cannot move price to edge of LP positin
-        if (params.newSqrtPriceX96 >= params.sqrtPriceX96B || params.newSqrtPriceX96 <= params.sqrtPriceX96B) revert SwapOutOfBounds();
+        if (params.newSqrtPriceX96 >= params.sqrtPriceX96B || params.newSqrtPriceX96 <= params.sqrtPriceX96A) revert PriceOutOfBounds();
         
         /// get amount0/1 of current liquidity
         (uint256 current0, uint256 current1) = LiquidityAmounts.getAmountsForLiquidity(
@@ -980,5 +1007,14 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         if (blockDelta == 0) revert PoolAlreadyOpened();
 
         return blockDelta;
+    }
+
+    function _sqrt(uint256 x) internal pure returns (uint256 y) {
+        uint256 z = (x + 1) / 2;
+        y = x;
+        while (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
+        }
     }
 }
