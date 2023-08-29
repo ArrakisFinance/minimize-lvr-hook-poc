@@ -2,9 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
-
 import {BaseHook} from "@uniswap/v4-periphery/contracts/BaseHook.sol";
-
 import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
@@ -64,6 +62,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     /// ----------
 
     uint256 public lastBlockTouch;
+    uint256 public lastBlockCleared;
     int256 public hedgeRequired0;
     int256 public hedgeRequired1;
     uint160 public sqrtPriceCommitment;
@@ -731,12 +730,11 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     }
 
     function _clearHedger() internal {
-        (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
-            PoolIdLibrary.toId(poolKey)
-        );
+        if (lastBlockCleared != block.number) {
+            (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
+                PoolIdLibrary.toId(poolKey)
+            );
 
-        /// if prices match or it's the first mint, don't touch liquidity
-        if (sqrtPriceX96 != sqrtPriceCommitment) {
             Position.Info memory info = PoolManager(
                 payable(address(poolManager))
             ).getPosition(
@@ -760,14 +758,15 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             _clear1155Balances();
 
             /// swap 1 wei in zero liquidity to kick the price to sqrtPriceCommitment
-            poolManager.swap(
-                poolKey, 
-                IPoolManager.SwapParams({
-                    zeroForOne: sqrtPriceCommitment < sqrtPriceX96,
-                    amountSpecified: 1,
-                    sqrtPriceLimitX96: sqrtPriceCommitment
-                })
-            );
+            if (sqrtPriceX96 != sqrtPriceCommitment)
+                poolManager.swap(
+                    poolKey,
+                    IPoolManager.SwapParams({
+                        zeroForOne: sqrtPriceCommitment < sqrtPriceX96,
+                        amountSpecified: 1,
+                        sqrtPriceLimitX96: sqrtPriceCommitment
+                    })
+                );
 
             uint160 sqrtPriceX96A = TickMath.getSqrtRatioAtTick(lowerTick);
             uint160 sqrtPriceX96B = TickMath.getSqrtRatioAtTick(upperTick);
@@ -800,24 +799,25 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                         tickUpper: upperTick
                     })
                 );
+
+            if (hedgeCommitment0 > 0) {
+                poolKey.currency0.transfer(address(poolManager), hedgeCommitment0);
+                poolManager.settle(poolKey.currency0);
+            } 
+            if (hedgeCommitment1 > 0) {
+                poolKey.currency1.transfer(address(poolManager), hedgeCommitment1);
+                poolManager.settle(poolKey.currency1);
+            }
+
+            _mintLeftover();
+
+            // reset hedger variables
+            hedgeRequired0 = 0;
+            hedgeRequired1 = 0;
+            hedgeCommitment0 = 0;
+            hedgeCommitment1 = 0;
+            lastBlockCleared = block.number;
         }
-
-        if (hedgeCommitment0 > 0) {
-            poolKey.currency0.transfer(address(poolManager), hedgeCommitment0);
-            poolManager.settle(poolKey.currency0);
-        } 
-        if (hedgeCommitment1 > 0) {
-            poolKey.currency1.transfer(address(poolManager), hedgeCommitment1);
-            poolManager.settle(poolKey.currency1);
-        }
-
-        _mintLeftover();
-
-        // reset hedger variables
-        hedgeRequired0 = 0;
-        hedgeRequired1 = 0;
-        hedgeCommitment0 = 0;
-        hedgeCommitment1 = 0;
     }
 
     function _mintLeftover() internal {
