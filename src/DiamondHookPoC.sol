@@ -47,7 +47,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     error BurnExceedsSupply();
     error WithdrawExceedsAvailable();
     error OnlyCommitter();
-    error SwapOutOfBounds();
+    error PriceOutOfBounds();
 
     uint24 internal constant _PIPS = 1000000;
 
@@ -200,7 +200,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             (, int24 tick, , , , ) = poolManager.getSlot0(
                 PoolIdLibrary.toId(poolKey)
             );
-            if (tick >= upperTick || tick <= lowerTick) revert SwapOutOfBounds();
+            if (tick >= upperTick || tick <= lowerTick) revert PriceOutOfBounds();
             
             /// NOTE this assumes static fees !!!
             uint24 fee = poolKey.fee.getStaticFee();
@@ -904,6 +904,8 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         uint256 priceX96 = FullMath.mulDiv(maxLiquidity1 + extra1, 1 << 96, maxLiquidity0 + extra0);
         uint160 finalSqrtPriceX96 = SafeCast.toUint160(_sqrt(priceX96) * (1 << 48));
 
+        if (finalSqrtPriceX96 >= sqrtPriceX96B || finalSqrtPriceX96 <= sqrtPriceX96A) revert PriceOutOfBounds();
+
         int256 finalLiquidity = SafeCast.toInt256(uint256(LiquidityAmounts.getLiquidityForAmounts(
             finalSqrtPriceX96,
             sqrtPriceX96A,
@@ -935,7 +937,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     function _computeArbSwap(ComputeArbParams memory params) internal pure returns (uint256 swap0, uint256 swap1, int256 newLiquidity, bool zeroForOne) {
         /// cannot move price to edge of LP positin
-        if (params.newSqrtPriceX96 >= params.sqrtPriceX96B || params.newSqrtPriceX96 <= params.sqrtPriceX96B) revert SwapOutOfBounds();
+        if (params.newSqrtPriceX96 >= params.sqrtPriceX96B || params.newSqrtPriceX96 <= params.sqrtPriceX96A) revert PriceOutOfBounds();
         
         /// get amount0/1 of current liquidity
         (uint256 current0, uint256 current1) = LiquidityAmounts.getAmountsForLiquidity(
