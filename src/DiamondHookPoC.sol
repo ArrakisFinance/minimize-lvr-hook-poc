@@ -429,66 +429,64 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     function _lockAcquiredArb(PoolManagerCalldata memory pmCalldata) internal {
         uint256 blockDelta = _checkLastOpen();
 
-        _resetLiquidity();
-
-        (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
-            PoolIdLibrary.toId(poolKey)
-        );
+        (
+            uint160 sqrtPriceX96Real,
+            uint160 sqrtPriceX96Virtual,
+            uint128 liquidityReal,
+            uint128 liquidityVirtual
+        ) = _resetLiquidity(false);
 
         uint160 newSqrtPriceX96 = SafeCast.toUint160(pmCalldata.amount);
 
-        /// if prices match, nothing to do
-        if (sqrtPriceX96 == newSqrtPriceX96) return;
-
-        Position.Info memory info = PoolManager(
-            payable(address(poolManager))
-        ).getPosition(
-                PoolIdLibrary.toId(poolKey),
-                address(this),
-                lowerTick,
-                upperTick
-            );
-
         /// compute swap amounts, swap direction, and amount of liquidity to mint
-        (uint256 swap0, uint256 swap1, int256 newLiquidity, bool zeroForOne) = 
-            _getArbSwap(sqrtPriceX96, newSqrtPriceX96, info.liquidity, blockDelta);
+        (uint256 swap0, uint256 swap1, uint128 newLiquidity) = 
+            _getArbSwap(sqrtPriceX96Virtual, newSqrtPriceX96, liquidityVirtual, blockDelta);
 
         /// burn all liquidity
-        poolManager.modifyPosition(
-            poolKey,
-            IPoolManager.ModifyPositionParams({
-                liquidityDelta: -SafeCast.toInt256(
-                    uint256(info.liquidity)
-                ),
-                tickLower: lowerTick,
-                tickUpper: upperTick
-            })
-        );
+        if (liquidityReal > 0) {
+            poolManager.modifyPosition(
+                poolKey,
+                IPoolManager.ModifyPositionParams({
+                    liquidityDelta: -SafeCast.toInt256(uint256(liquidityReal)),
+                    tickLower: lowerTick,
+                    tickUpper: upperTick
+                })
+            );
 
-        _clear1155Balances();
+            _clear1155Balances();
+        }
 
         /// swap 1 wei in zero liquidity to kick the price to newSqrtPriceX96
-        poolManager.swap(
-            poolKey, 
-            IPoolManager.SwapParams({
-                zeroForOne: zeroForOne,
-                amountSpecified: 1,
-                sqrtPriceLimitX96: newSqrtPriceX96
-            })
-        );
+        if (newSqrtPriceX96 != sqrtPriceX96Real) {
+            bool zeroForOne = newSqrtPriceX96 < sqrtPriceX96Real;
+            poolManager.swap(
+                poolKey, 
+                IPoolManager.SwapParams({
+                    zeroForOne: zeroForOne,
+                    amountSpecified: 1,
+                    sqrtPriceLimitX96: newSqrtPriceX96
+                })
+            );
+
+            if (zeroForOne) {
+                swap0 += 1;
+            } else {
+                swap1 += 1;
+            }
+        }
 
         /// mint new liquidity around newSqrtPriceX96
         poolManager.modifyPosition(
             poolKey,
             IPoolManager.ModifyPositionParams({
-                liquidityDelta: newLiquidity,
+                liquidityDelta: SafeCast.toInt256(uint256(newLiquidity)),
                 tickLower: lowerTick,
                 tickUpper: upperTick
             })
         );
 
         /// handle swap transfers (send to / transferFrom arber)
-        if (zeroForOne) {
+        if (newSqrtPriceX96 < sqrtPriceX96Virtual) {
             /// transfer swapInAmt to PoolManager
             _transferFromOrTransferNative(
                 poolKey.currency0,
@@ -569,25 +567,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             }
         } else {
             /// if this is first touch in this block, then we need to _resetLiquidity() first
-            if (lastBlockOpened != block.number) _resetLiquidity();
+            ( , , uint128 liquidity,) = _resetLiquidity(true);
 
-            /// burn everything positions and erc1155
-            Position.Info memory info = PoolManager(
-                payable(address(poolManager))
-            ).getPosition(
-                    PoolIdLibrary.toId(poolKey),
-                    address(this),
-                    lowerTick,
-                    upperTick
-                );
-
-            if (info.liquidity > 0)
+            if (liquidity > 0)
                 poolManager.modifyPosition(
                     poolKey,
                     IPoolManager.ModifyPositionParams({
-                        liquidityDelta: -SafeCast.toInt256(
-                            uint256(info.liquidity)
-                        ),
+                        liquidityDelta: -SafeCast.toInt256(uint256(liquidity)),
                         tickLower: lowerTick,
                         tickUpper: upperTick
                     })
@@ -612,13 +598,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             _a1 = amount1;
 
             // mint back the position.
-            uint256 liquidity = info.liquidity + FullMath.mulDiv(pmCalldata.amount, info.liquidity, totalSupply);
+            uint256 newLiquidity = liquidity + FullMath.mulDiv(pmCalldata.amount, liquidity, totalSupply);
 
-            if (liquidity > 0)
+            if (newLiquidity > 0)
                 poolManager.modifyPosition(
                     poolKey,
                     IPoolManager.ModifyPositionParams({
-                        liquidityDelta: SafeCast.toInt256(liquidity),
+                        liquidityDelta: SafeCast.toInt256(newLiquidity),
                         tickLower: lowerTick,
                         tickUpper: upperTick
                     })
@@ -721,27 +707,25 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         _mintLeftover();
     }
 
-    function _resetLiquidity() internal {
-        if (lastBlockReset != block.number) {
-            (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
-                PoolIdLibrary.toId(poolKey)
-            );
+    function _resetLiquidity(bool isMint) internal returns (uint160 sqrtPriceX96, uint160 newSqrtPriceX96, uint128 liquidity, uint128 newLiquidity) {
+        (sqrtPriceX96, , , , , ) = poolManager.getSlot0(
+            PoolIdLibrary.toId(poolKey)
+        );
 
-            Position.Info memory info = PoolManager(
-                payable(address(poolManager))
-            ).getPosition(
-                    PoolIdLibrary.toId(poolKey),
-                    address(this),
-                    lowerTick,
-                    upperTick
-                );
+        Position.Info memory info = PoolManager(
+            payable(address(poolManager))
+        ).getPosition(
+                PoolIdLibrary.toId(poolKey),
+                address(this),
+                lowerTick,
+                upperTick
+            );
+        if (lastBlockReset <= lastBlockOpened) {
             if (info.liquidity > 0)
                 poolManager.modifyPosition(
                     poolKey,
                     IPoolManager.ModifyPositionParams({
-                        liquidityDelta: -SafeCast.toInt256(
-                            uint256(info.liquidity)
-                        ),
+                        liquidityDelta: -SafeCast.toInt256(uint256(info.liquidity)),
                         tickLower: lowerTick,
                         tickUpper: upperTick
                     })
@@ -749,39 +733,52 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             _clear1155Balances();
 
-            (uint160 newSqrtPriceX96, int256 newLiquidity) = _getResetPriceAndLiquidity(committedSqrtPriceX96);
+            (newSqrtPriceX96, newLiquidity) = _getResetPriceAndLiquidity(committedSqrtPriceX96, isMint);
 
-            /// swap 1 wei in zero liquidity to kick the price to committedSqrtPriceX96
-            if (sqrtPriceX96 != newSqrtPriceX96)
-                poolManager.swap(
-                    poolKey,
-                    IPoolManager.SwapParams({
-                        zeroForOne: newSqrtPriceX96 < sqrtPriceX96,
-                        amountSpecified: 1,
-                        sqrtPriceLimitX96: newSqrtPriceX96
-                    })
-                );
+            if (isMint) {
+                /// swap 1 wei in zero liquidity to kick the price to committedSqrtPriceX96
+                if (sqrtPriceX96 != newSqrtPriceX96)
+                    poolManager.swap(
+                        poolKey,
+                        IPoolManager.SwapParams({
+                            zeroForOne: newSqrtPriceX96 < sqrtPriceX96,
+                            amountSpecified: 1,
+                            sqrtPriceLimitX96: newSqrtPriceX96
+                        })
+                    );
 
-            if (newLiquidity > 0)
-                poolManager.modifyPosition(
-                    poolKey,
-                    IPoolManager.ModifyPositionParams({
-                        liquidityDelta: SafeCast.toInt256(uint256(newLiquidity)),
-                        tickLower: lowerTick,
-                        tickUpper: upperTick
-                    })
-                );
+                if (newLiquidity > 0)
+                    poolManager.modifyPosition(
+                        poolKey,
+                        IPoolManager.ModifyPositionParams({
+                            liquidityDelta: SafeCast.toInt256(uint256(newLiquidity)),
+                            tickLower: lowerTick,
+                            tickUpper: upperTick
+                        })
+                    );
 
-            if (hedgeCommitted0 > 0) {
-                poolKey.currency0.transfer(address(poolManager), hedgeCommitted0);
-                poolManager.settle(poolKey.currency0);
-            } 
-            if (hedgeCommitted1 > 0) {
-                poolKey.currency1.transfer(address(poolManager), hedgeCommitted1);
-                poolManager.settle(poolKey.currency1);
+                liquidity = newLiquidity;
+
+                if (hedgeCommitted0 > 0) {
+                    poolKey.currency0.transfer(address(poolManager), hedgeCommitted0);
+                    poolManager.settle(poolKey.currency0);
+                } 
+                if (hedgeCommitted1 > 0) {
+                    poolKey.currency1.transfer(address(poolManager), hedgeCommitted1);
+                    poolManager.settle(poolKey.currency1);
+                }
+
+                _mintLeftover();
+            } else {
+                if (hedgeCommitted0 > 0) {
+                    poolKey.currency0.transfer(address(poolManager), hedgeCommitted0);
+                    poolManager.settle(poolKey.currency0);
+                } 
+                if (hedgeCommitted1 > 0) {
+                    poolKey.currency1.transfer(address(poolManager), hedgeCommitted1);
+                    poolManager.settle(poolKey.currency1);
+                } 
             }
-
-            _mintLeftover();
 
             // reset hedger variables
             hedgeRequired0 = 0;
@@ -791,6 +788,10 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             // store reset
             lastBlockReset = block.number;
+        } else {
+            liquidity = info.liquidity;
+            newLiquidity = info.liquidity;
+            newSqrtPriceX96 = sqrtPriceX96;
         }
     }
 
@@ -873,7 +874,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         return (currency0Balance, currency1Balance);
     }
 
-    function _getResetPriceAndLiquidity(uint160 lastCommittedSqrtPriceX96) internal view returns (uint160, int256) {
+    function _getResetPriceAndLiquidity(uint160 lastCommittedSqrtPriceX96, bool isMint) internal view returns (uint160, uint128) {
         (uint256 totalHoldings0, uint256 totalHoldings1) = _checkCurrencyBalances();
         
         uint160 sqrtPriceX96Lower = TickMath.getSqrtRatioAtTick(lowerTick);
@@ -899,20 +900,24 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             uint256 extra0 = FullMath.mulDiv(totalHoldings0 - maxLiquidity0, vaultRedepositRate, _PIPS);
             uint256 extra1 = FullMath.mulDiv(totalHoldings1 - maxLiquidity1, vaultRedepositRate, _PIPS);
 
-            /// NOTE this algorithm only works if liquidity position
+            /// NOTE this algorithm only works if liquidity position is full range
             uint256 priceX96 = FullMath.mulDiv(maxLiquidity1 + extra1, 1 << 96, maxLiquidity0 + extra0);
             finalSqrtPriceX96 = SafeCast.toUint160(_sqrt(priceX96) * (1 << 48));
         }
 
         if (finalSqrtPriceX96 >= sqrtPriceX96Upper || finalSqrtPriceX96 <= sqrtPriceX96Lower) revert PriceOutOfBounds();
 
-        int256 finalLiquidity = SafeCast.toInt256(uint256(LiquidityAmounts.getLiquidityForAmounts(
+        if (isMint) {
+            totalHoldings0 -= 1;
+            totalHoldings1 -= 1;
+        }
+        uint128 finalLiquidity = LiquidityAmounts.getLiquidityForAmounts(
             finalSqrtPriceX96,
             sqrtPriceX96Lower,
             sqrtPriceX96Upper,
-            totalHoldings0-1,
-            totalHoldings1-1
-        )));
+            totalHoldings0,
+            totalHoldings1
+        );
 
         return (finalSqrtPriceX96, finalLiquidity);
     }
@@ -922,7 +927,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         uint160 newSqrtPriceX96,
         uint128 liquidity,
         uint256 blockDelta
-    ) internal view returns (uint256, uint256, int256, bool) {
+    ) internal view returns (uint256, uint256, uint128) {
         return _computeArbSwap(
             ComputeArbParams({
                 sqrtPriceX96: sqrtPriceX96,
@@ -935,7 +940,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         );
     }
 
-    function _computeArbSwap(ComputeArbParams memory params) internal pure returns (uint256 swap0, uint256 swap1, int256 newLiquidity, bool zeroForOne) {
+    function _computeArbSwap(ComputeArbParams memory params) internal pure returns (uint256 swap0, uint256 swap1, uint128 newLiquidity) {
         /// cannot do arb in zero liquidity
         if (params.liquidity == 0) revert LiquidityZero();
 
@@ -959,7 +964,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         );
     
         if (new0 == current0 || new1 == current1) revert ArbTooSmall();
-        zeroForOne = new0 > current0;
+        bool zeroForOne = new0 > current0;
         
         /// differential of info.liquidity amount0/1 at those two prices gives X and Y of classic UniV2 swap
         /// to get (1-Beta)*X and (1-Beta)*Y for our swap apply `factor`
@@ -974,22 +979,15 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
         /// here we compute the newLiquidity we can mint after the arb swap operation
         /// this should be less than previous info.liquidity by `C`, leaving some leftover in one token
-        newLiquidity = SafeCast.toInt256(uint256(LiquidityAmounts.getLiquidityForAmounts(
+        newLiquidity = LiquidityAmounts.getLiquidityForAmounts(
             params.newSqrtPriceX96,
             params.sqrtPriceX96Lower,
             params.sqrtPriceX96Upper,
             finalLiq0,
             finalLiq1
-        )));
+        );
 
         if (newLiquidity == 0) revert LiquidityZero();
-
-        /// here we force arber to always input 1 extra wei into the swapInAmount, which ends up getting burned to kick the price in 0 liquidity
-        if (zeroForOne) {
-            swap0 += 1;
-        } else {
-            swap1 += 1;
-        }
     }
 
     function _getBeta(uint256 blockDelta) internal view returns (uint24) {
