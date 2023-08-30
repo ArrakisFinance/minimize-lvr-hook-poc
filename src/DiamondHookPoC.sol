@@ -566,8 +566,21 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 poolManager.settle(poolKey.currency1);
             }
         } else {
+            uint128 liquidity;
             /// if this is first touch in this block, then we need to _resetLiquidity() first
-            ( , , uint128 liquidity,) = _resetLiquidity(true);
+            if (lastBlockOpened != block.number) {
+                ( , , liquidity,) = _resetLiquidity(true);
+            } else {
+                Position.Info memory info = PoolManager(
+                    payable(address(poolManager))
+                ).getPosition(
+                        PoolIdLibrary.toId(poolKey),
+                        address(this),
+                        lowerTick,
+                        upperTick
+                    );
+                liquidity = info.liquidity;
+            }
 
             if (liquidity > 0)
                 poolManager.modifyPosition(
@@ -631,28 +644,40 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         }
 
         _mintLeftover();
+
+        if (hedgeRequired0 > 0) {
+            hedgeRequired0 += SafeCast.toInt256(FullMath.mulDiv(uint256(hedgeRequired0), pmCalldata.amount, totalSupply));
+        }
+        if (hedgeRequired1 > 0) {
+            hedgeRequired1 += SafeCast.toInt256(FullMath.mulDiv(uint256(hedgeRequired1), pmCalldata.amount, totalSupply));
+        }
     }
 
     function _lockAcquiredBurn(PoolManagerCalldata memory pmCalldata) internal {
         /// burn everything, positions and erc1155
         uint256 totalSupply = totalSupply();
 
-        Position.Info memory info = PoolManager(
-            payable(address(poolManager))
-        ).getPosition(
-                PoolIdLibrary.toId(poolKey),
-                address(this),
-                lowerTick,
-                upperTick
-            );
+        uint128 liquidity;
+        /// if this is first touch in this block, then we need to _resetLiquidity() first
+        if (lastBlockOpened != block.number) {
+            ( , , liquidity,) = _resetLiquidity(true);
+        } else {
+            Position.Info memory info = PoolManager(
+                payable(address(poolManager))
+            ).getPosition(
+                    PoolIdLibrary.toId(poolKey),
+                    address(this),
+                    lowerTick,
+                    upperTick
+                );
+            liquidity = info.liquidity;
+        }
 
-        if (info.liquidity > 0)
+        if (liquidity > 0)
             poolManager.modifyPosition(
                 poolKey,
                 IPoolManager.ModifyPositionParams({
-                    liquidityDelta: -SafeCast.toInt256(
-                        uint256(info.liquidity)
-                    ),
+                    liquidityDelta: -SafeCast.toInt256(uint256(liquidity)),
                     tickLower: lowerTick,
                     tickUpper: upperTick
                 })
@@ -693,21 +718,28 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         _a1 = amount1;
 
         // recreate the position
-        uint256 liquidity = info.liquidity - FullMath.mulDiv(pmCalldata.amount, info.liquidity, totalSupply);
-        if (liquidity > 0)
+        uint256 newLiquidity = liquidity - FullMath.mulDiv(pmCalldata.amount, liquidity, totalSupply);
+        if (newLiquidity > 0)
             poolManager.modifyPosition(
                 poolKey,
                 IPoolManager.ModifyPositionParams({
-                    liquidityDelta: SafeCast.toInt256(liquidity),
+                    liquidityDelta: SafeCast.toInt256(newLiquidity),
                     tickLower: lowerTick,
                     tickUpper: upperTick
                 })
             );
 
         _mintLeftover();
+
+        if (hedgeRequired0 > 0) {
+            hedgeRequired0 -= SafeCast.toInt256(FullMath.mulDiv(uint256(hedgeRequired0), pmCalldata.amount, totalSupply));
+        }
+        if (hedgeRequired1 > 0) {
+            hedgeRequired1 -= SafeCast.toInt256(FullMath.mulDiv(uint256(hedgeRequired1), pmCalldata.amount, totalSupply));
+        }
     }
 
-    function _resetLiquidity(bool isMint) internal returns (uint160 sqrtPriceX96, uint160 newSqrtPriceX96, uint128 liquidity, uint128 newLiquidity) {
+    function _resetLiquidity(bool isMintOrBurn) internal returns (uint160 sqrtPriceX96, uint160 newSqrtPriceX96, uint128 liquidity, uint128 newLiquidity) {
         (sqrtPriceX96, , , , , ) = poolManager.getSlot0(
             PoolIdLibrary.toId(poolKey)
         );
@@ -733,9 +765,9 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             _clear1155Balances();
 
-            (newSqrtPriceX96, newLiquidity) = _getResetPriceAndLiquidity(committedSqrtPriceX96, isMint);
+            (newSqrtPriceX96, newLiquidity) = _getResetPriceAndLiquidity(committedSqrtPriceX96, isMintOrBurn);
 
-            if (isMint) {
+            if (isMintOrBurn) {
                 /// swap 1 wei in zero liquidity to kick the price to committedSqrtPriceX96
                 if (sqrtPriceX96 != newSqrtPriceX96)
                     poolManager.swap(
@@ -874,7 +906,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         return (currency0Balance, currency1Balance);
     }
 
-    function _getResetPriceAndLiquidity(uint160 lastCommittedSqrtPriceX96, bool isMint) internal view returns (uint160, uint128) {
+    function _getResetPriceAndLiquidity(uint160 lastCommittedSqrtPriceX96, bool isMintOrBurn) internal view returns (uint160, uint128) {
         (uint256 totalHoldings0, uint256 totalHoldings1) = _checkCurrencyBalances();
         
         uint160 sqrtPriceX96Lower = TickMath.getSqrtRatioAtTick(lowerTick);
@@ -907,7 +939,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
         if (finalSqrtPriceX96 >= sqrtPriceX96Upper || finalSqrtPriceX96 <= sqrtPriceX96Lower) revert PriceOutOfBounds();
 
-        if (isMint) {
+        if (isMintOrBurn) {
             totalHoldings0 -= 1;
             totalHoldings1 -= 1;
         }
