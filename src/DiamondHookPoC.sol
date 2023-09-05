@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.20;
 
+
+import {console} from "forge-std/console.sol";
+
 import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
 import {BaseHook} from "@uniswap/v4-periphery/contracts/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
@@ -21,6 +24,8 @@ import {IERC1155Receiver} from "@openzeppelin/contracts/token/ERC1155/IERC1155Re
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+import {BaseFactory} from "./BaseFactory.sol";
 
 contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     using PoolIdLibrary for PoolKey;
@@ -160,6 +165,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         uint160 sqrtPriceX96
     ) external override returns (bytes4) {
         /// can only initialize one pool once.
+
         if (initialized) revert AlreadyInitialized();
 
         /// validate tick bounds on pool initialization
@@ -244,15 +250,14 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     /// method called back on PoolManager.lock()
     function lockAcquired(
-        uint256,
-        /* id */ bytes calldata data_
-    ) external poolManagerOnly returns (bytes memory) {
+        bytes calldata data_
+    ) external poolManagerOnly override returns (bytes memory) {
         /// decode calldata passed through lock()
+
         PoolManagerCalldata memory pmCalldata = abi.decode(
             data_,
             (PoolManagerCalldata)
         );
-
         /// first case mint action
         if (pmCalldata.actionType == 0) _lockAcquiredMint(pmCalldata);
         /// second case burn action
@@ -370,7 +375,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 actionType: 0 /// mint action
             })
         );
-
         /// state variables to be able to bubble up amount0 and amount1 as return args
         _a0 = _a1 = 0;
 
@@ -474,7 +478,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 swap1 += 1;
             }
         }
-
         /// mint new liquidity around newSqrtPriceX96
         poolManager.modifyPosition(
             poolKey,
@@ -495,6 +498,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 swap0
             );
             poolManager.settle(poolKey.currency0);
+            
             /// transfer swapOutAmt to arber
             poolManager.take(
                 poolKey.currency1,
@@ -503,12 +507,16 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             );
         } else {
             /// transfer swapInAmt to PoolManager
+            
             _transferFromOrTransferNative(
                 poolKey.currency1,
                 pmCalldata.msgSender,
                 address(poolManager),
                 swap1
             );
+            // CONOR
+            // THIS SETTLE SEEMS TO BE FAULTY
+            // it was faulty at one point...
             poolManager.settle(poolKey.currency1);
             /// transfer swapOutAmt to arber
             poolManager.take(
@@ -517,7 +525,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 swap0
             );
         }
-
         /// if any positive balances remain in PoolManager after all operations, mint erc1155 shares
         _mintLeftover();
     }
@@ -629,7 +636,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 poolManager.settle(poolKey.currency1);
             }
         }
-
         _mintLeftover();
     }
 
@@ -794,10 +800,12 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             newSqrtPriceX96 = sqrtPriceX96;
         }
     }
-
+    
+    // START HERE. 1 UNIT OF CURRENCY MESSING THINGS UP
+    // can we mint and settle at the same time???
     function _mintLeftover() internal {
         (uint256 currencyBalance0, uint256 currencyBalance1) = _checkCurrencyBalances();
-
+        console.log("balances", currencyBalance0, currencyBalance1);
         if (currencyBalance0 > 0) {
             poolManager.mint(poolKey.currency0, address(this), currencyBalance0);
         }
@@ -862,14 +870,24 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     function _checkCurrencyBalances() internal view returns (uint256, uint256) {
         int256 currency0BalanceRaw = poolManager.currencyDelta(address(this), poolKey.currency0);
         if (currency0BalanceRaw > 0) {
-            revert("delta currency0 cannot be positive");
+            if (currency0BalanceRaw ==1){
+
+            }
+            else{
+                revert("delta currency0 cannot be positive");
+            }
         }
-        uint256 currency0Balance = SafeCast.toUint256(-currency0BalanceRaw);
+        uint256 currency0Balance = SafeCast.toUint256(1-currency0BalanceRaw);
         int256 currency1BalanceRaw = poolManager.currencyDelta(address(this), poolKey.currency1);
         if (currency1BalanceRaw > 0) {
-            revert("delta currency1 cannot be positive");
+            if (currency1BalanceRaw ==1){
+                
+            }
+            else{
+                revert("delta currency1 cannot be positive");
+            }
         }
-        uint256 currency1Balance = SafeCast.toUint256(-currency1BalanceRaw);
+        uint256 currency1Balance = SafeCast.toUint256(1-currency1BalanceRaw);
 
         return (currency0Balance, currency1Balance);
     }
