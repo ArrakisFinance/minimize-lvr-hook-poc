@@ -47,7 +47,7 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
     int24 public tickSpacing=60;
     uint24 public baseBeta=PIPS/2; // % expressed as uint < 1e6
     uint24 public decayRate=PIPS/10; // % expressed as uint < 1e6
-    uint24 public vaultRedepositRate=PIPS/100; // % expressed as uint < 1e6
+    uint24 public vaultRedepositRate=0; // % expressed as uint < 1e6
     uint24 public fee=PIPS/300; // % expressed as uint < 1e6
 
     int24 public lowerTick;
@@ -126,13 +126,23 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
 
         //For getting active token reserves in the pool
         
-
+        // pushing from 1 to 4 to 1 with Beta 0.5
+        // and vaultDepositRate 0 
+        // should give us reserves
+        // of (15/16 * 10**18, 15/16 * 10**18), and
+        // vault tokens (0, 3/16 * 10**18)
+        // The discrepancy is because 
+        // we don't try to add vault tokens back into the pool 
+        // after an arb swap.
+        // If we have pool price p, and a vault with both tokens,
+        // we want to add as much liquidity at price p back into the 
+        // pool.
         console.log(token0.balanceOf(address(manager)), "poolManagerBalance0");
         console.log(token1.balanceOf(address(manager)), "poolManagerBalance1");
         console.log(token0.balanceOf(address(hook)), "hook Balance0");
         console.log(token1.balanceOf(address(hook)), "hook Balance1");
         (uint256 token0sInPool, uint256 token1sInPool)=getTokenReservesInPool();
-        console.log(token0sInPool,token1sInPool, "liquidity");
+        console.log(token0sInPool,token1sInPool, "tokenReservesInPool");
     }
 
 
