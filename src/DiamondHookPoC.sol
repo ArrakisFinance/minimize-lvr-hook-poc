@@ -526,6 +526,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             );
         }
         /// if any positive balances remain in PoolManager after all operations, mint erc1155 shares
+        
+        
+        //Conor
+        // I think we need another function here which
+        // checks the difference between poolManager balances
+        // and pool liqudiity, and tries to add as much 
+        // vault tokens to the pool at the pool price as possible
         _mintLeftover();
     }
 
