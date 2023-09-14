@@ -216,14 +216,21 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
 
     function testWithdraw() public {
         hook.mint(1*10**18,address(this));
+        uint256 height=1;
         uint256 price=4;
         uint160 newSQRTPrice=computeNewSQRTPrice(price);
         hook.openPool(newSQRTPrice);
-        console.log(token0.balanceOf(address(manager)), "poolManagerBalance0");
-        console.log(token1.balanceOf(address(manager)), "poolManagerBalance1");
         hook.burn(10**16, address(this));
-        console.log(token0.balanceOf(address(manager)), "poolManagerBalance0");
-        console.log(token1.balanceOf(address(manager)), "poolManagerBalance1");
+        vm.roll(++height);
+        price=2;
+        newSQRTPrice=computeNewSQRTPrice(price);
+        hook.openPool(newSQRTPrice);
+        hook.burn(10**16, address(this));
+        hook.mint(1*10**18,address(this));
+        vm.roll(++height);
+        price=10;
+        hook.openPool(newSQRTPrice);
+        hook.burn(10**18, address(this));
         
     }
 
