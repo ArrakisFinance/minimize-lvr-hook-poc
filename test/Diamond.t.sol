@@ -47,7 +47,9 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
     int24 public tickSpacing=60;
     uint24 public baseBeta=PIPS/2; // % expressed as uint < 1e6
     uint24 public decayRate=PIPS/10; // % expressed as uint < 1e6
-    uint24 public vaultRedepositRate=0; // % expressed as uint < 1e6
+    uint24 public vaultRedepositRate=PIPS/50; // % expressed as uint < 1e6
+    // we also want to pass in a minimum constant amount (maybe even a % of total pool size, so the vault eventually empties)
+    // if we only ever take 1% of the vault, the vault may never empty.
     uint24 public fee=PIPS/300; // % expressed as uint < 1e6
 
     int24 public lowerTick;
@@ -78,7 +80,8 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
             hook
         );
         poolId = poolKey.toId();
-        manager.initialize(poolKey, SQRT_RATIO_1_1);
+        uint256 price =1;
+        manager.initialize(poolKey, computeNewSQRTPrice(price));
         swapRouter = new PoolSwapTest(manager);
         token0.approve(address(hook), type(uint256).max);
         token1.approve(address(hook), type(uint256).max);
@@ -90,15 +93,14 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
     }
 
 
-
-    function testArb4SwapArb1() public {
-        hook.mint(1*10**18,address(hook));
+    function testArb4SwapArb1NonZeroReAdding() public {
+        hook.mint(1*10**18,address(this));
         console.log(manager.getLiquidity(poolId), "liquidity");
         uint256 height=1;
         vm.roll(height);
         //Letting PIPS be the multiplier on price
-        uint256 price=4;
 
+        uint256 price=4;
         uint160 newSQRTPrice=computeNewSQRTPrice(price);
         hook.openPool(newSQRTPrice);
 
@@ -145,7 +147,85 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
         console.log(token0sInPool,token1sInPool, "tokenReservesInPool");
     }
 
+    function testArb4SwapArb1NonZeroReAdding_Twice() public {
+        hook.mint(1*10**18,address(this));
+        uint256 height=1;
+        vm.roll(height);
+        //Letting PIPS be the multiplier on price
+        uint256 price=4;
 
+        uint160 newSQRTPrice=computeNewSQRTPrice(price);
+        hook.openPool(newSQRTPrice);
+
+        (uint160 newPrice,,,,,)=manager.getSlot0(poolId);
+        vm.roll(height+1);
+        price =1;
+        newSQRTPrice=computeNewSQRTPrice(price);
+        hook.openPool(newSQRTPrice);
+
+        vm.roll(height+2);
+        //Letting PIPS be the multiplier on price
+        price=4;
+
+        newSQRTPrice=computeNewSQRTPrice(price);
+        hook.openPool(newSQRTPrice);
+
+        vm.roll(height+3);
+        price =1;
+        newSQRTPrice=computeNewSQRTPrice(price);
+        hook.openPool(newSQRTPrice);
+
+        console.log(token0.balanceOf(address(manager)), "poolManagerBalance0");
+        console.log(token1.balanceOf(address(manager)), "poolManagerBalance1");
+        console.log(token0.balanceOf(address(hook)), "hook Balance0");
+        console.log(token1.balanceOf(address(hook)), "hook Balance1");
+        (uint256 token0sInPool, uint256 token1sInPool)=getTokenReservesInPool();
+        console.log(token0sInPool,token1sInPool, "tokenReservesInPool");
+    }
+
+    function testManyWhipSaws() public {
+        hook.mint(1*10**18,address(this));
+        uint256 height=1;
+        uint256 price;
+        uint160 newSQRTPrice;
+        vm.roll(height++);
+        price =4;
+        newSQRTPrice=computeNewSQRTPrice(price);
+        console.log(computeNewSQRTPrice(price), computeNewSQRTPrice_PIPS(price*PIPS));
+        hook.openPool(newSQRTPrice);
+        for(uint256 i = 0; i < 5; i++) {
+            console.log(i, "pre");
+            vm.roll(height++);
+            price =PIPS;
+            newSQRTPrice=computeNewSQRTPrice_PIPS(price);
+            hook.openPool(newSQRTPrice);
+            console.log(i, "mid");
+            vm.roll(height++);
+            price =4*PIPS;
+            newSQRTPrice=computeNewSQRTPrice_PIPS(price);
+            hook.openPool(newSQRTPrice);
+            console.log(i, "post");
+        }
+        vm.roll(height++);
+        price =PIPS;
+        newSQRTPrice=computeNewSQRTPrice_PIPS(price);
+        hook.openPool(newSQRTPrice);
+        console.log(token0.balanceOf(address(manager)), "poolManagerBalance0");
+        console.log(token1.balanceOf(address(manager)), "poolManagerBalance1");
+    }
+
+    function testWithdraw() public {
+        hook.mint(1*10**18,address(this));
+        uint256 price=4;
+        uint160 newSQRTPrice=computeNewSQRTPrice(price);
+        hook.openPool(newSQRTPrice);
+        console.log(token0.balanceOf(address(manager)), "poolManagerBalance0");
+        console.log(token1.balanceOf(address(manager)), "poolManagerBalance1");
+        hook.burn(10**16, address(this));
+        console.log(token0.balanceOf(address(manager)), "poolManagerBalance0");
+        console.log(token1.balanceOf(address(manager)), "poolManagerBalance1");
+        
+    }
 
     function _sqrt(uint256 x) internal pure returns (uint256 y) {
         uint256 z = (x + 1) / 2;
@@ -155,9 +235,15 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
             z = (x / z + z) / 2;
         }
     }
+
     function computeNewSQRTPrice(uint256 price) internal pure returns (uint160 y){
         y=uint160(_sqrt(price*2**96)*2**48);
     }
+
+    function computeNewSQRTPrice_PIPS(uint256 price) internal pure returns (uint160 y){
+        y=uint160((_sqrt(price*2**96)*2**48)/_sqrt(PIPS));
+    }
+
     function computeDecPriceFromNewSQRTPrice(uint160 price) internal pure returns (uint256 y){
         y=FullMath.mulDiv(uint256(price)**2,1,2**192);
     }
@@ -169,7 +255,4 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
         x=FullMath.mulDiv(liquidity,1,sqrtPoolPriceDecimals);
         y=liquidity*sqrtPoolPriceDecimals;
     }
-
-
-
 }
