@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 
-import {console} from "forge-std/console.sol";
+// import {console} from "forge-std/console.sol";
 
 import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
 import {BaseHook} from "@uniswap/v4-periphery/contracts/BaseHook.sol";
