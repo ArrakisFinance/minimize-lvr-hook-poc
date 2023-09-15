@@ -348,7 +348,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         if (committer != msg.sender) revert OnlyCommitter();
 
         if (amount0 > 0) {
-            uint256 withdrawAvailable0 = hedgeRequired0 > 0 ? hedgeCommitted0 - hedgeRequired0 - 1 : hedgeCommitted0;
+            uint256 withdrawAvailable0 = hedgeRequired0 > 0 ? hedgeCommitted0 - hedgeRequired0 : hedgeCommitted0;
             if (amount0 > withdrawAvailable0) revert WithdrawExceedsAvailable();
             hedgeCommitted0 -= amount0;
             if (poolKey.currency0.isNative()) {
@@ -362,7 +362,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         }
 
         if (amount1 > 0) {
-            uint256 withdrawAvailable1 = hedgeRequired1 > 0 ? hedgeCommitted1 - hedgeRequired1 - 1 : hedgeCommitted1;
+            uint256 withdrawAvailable1 = hedgeRequired1 > 0 ? hedgeCommitted1 - hedgeRequired1 : hedgeCommitted1;
             if (amount1 > withdrawAvailable1) revert WithdrawExceedsAvailable();
             hedgeCommitted1 -= amount1;
             if (poolKey.currency1.isNative()) {

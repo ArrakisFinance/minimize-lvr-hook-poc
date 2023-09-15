@@ -34,7 +34,7 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
     TestERC20 token0;
     TestERC20 token1;
     PoolId poolId;
-    DiamondHookPoC hook= DiamondHookPoC(address(
+    DiamondHookPoC hook = DiamondHookPoC(address(
                 uint160(
                     Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_MODIFY_POSITION_FLAG | Hooks.BEFORE_SWAP_FLAG |Hooks.AFTER_SWAP_FLAG
                 )
@@ -58,6 +58,12 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
     function setUp() public {
         token0 = new TestERC20(2**128);
         token1 = new TestERC20(2**128);
+
+        if (uint160(address(token0)) > uint160(address(token1))) {
+            TestERC20 temp = token0;
+            token0 = token1;
+            token1 = temp;
+        }
         
         
         manager = new PoolManager(500000);
@@ -74,8 +80,8 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
         }
         // Create the pool
         poolKey = PoolKey(
-            Currency.wrap(address(token1)),
             Currency.wrap(address(token0)),
+            Currency.wrap(address(token1)),
             fee,
             tickSpacing,
             hook
@@ -98,7 +104,7 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
 
     function testBasicArbSwap() public {
         // mint some liquidity
-        hook.mint(1*10**18,address(this));
+        hook.mint(10**18,address(this));
         uint256 height = 1;
         vm.roll(height);
 
@@ -123,12 +129,12 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
 
         // check expectations
         assertEq(newSQRTPriceCheck, newSQRTPrice); // pool price moved to where arb swap specified
-        assertGt(balance0ManagerAfter, balance0ManagerBefore); // pool gained token0
-        assertGt(balance1ManagerBefore, balance1ManagerAfter); // pool lost token1
-        assertGt(balance0ThisBefore, balance0ThisAfter); // arber lost token0
-        assertGt(balance1ThisAfter, balance1ThisBefore); // arber gained token1
-        assertEq(balance1ThisAfter-balance1ThisBefore, balance1ManagerBefore-balance1ManagerAfter); // net is 0
-        assertEq(balance0ThisBefore-balance0ThisAfter, balance0ManagerAfter-balance0ManagerBefore); // net is 0
+        assertGt(balance1ManagerAfter, balance1ManagerBefore); // pool gained token0
+        assertGt(balance0ManagerBefore, balance0ManagerAfter); // pool lost token1
+        assertGt(balance1ThisBefore, balance1ThisAfter); // arber lost token0
+        assertGt(balance0ThisAfter, balance0ThisBefore); // arber gained token1
+        assertEq(balance0ThisAfter-balance0ThisBefore, balance0ManagerBefore-balance0ManagerAfter); // net is 0
+        assertEq(balance1ThisBefore-balance1ThisAfter, balance1ManagerAfter-balance1ManagerBefore); // net is 0
         assertGt(liquidityBefore, liquidityAfter); // liquidity decreased
 
         // reset starting values
@@ -153,12 +159,12 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
 
         // check expectations 
         assertEq(newSQRTPrice, newSQRTPriceCheck);
-        assertGt(balance0ManagerBefore, balance0ManagerAfter);
-        assertGt(balance1ManagerAfter, balance1ManagerBefore);
-        assertGt(balance0ThisAfter, balance0ThisBefore);
-        assertGt(balance1ThisBefore, balance1ThisAfter);
-        assertEq(balance0ThisAfter-balance0ThisBefore, balance0ManagerBefore-balance0ManagerAfter);
-        assertEq(balance1ThisBefore-balance1ThisAfter, balance1ManagerAfter-balance1ManagerBefore);
+        assertGt(balance1ManagerBefore, balance1ManagerAfter);
+        assertGt(balance0ManagerAfter, balance0ManagerBefore);
+        assertGt(balance1ThisAfter, balance1ThisBefore);
+        assertGt(balance0ThisBefore, balance0ThisAfter);
+        assertEq(balance1ThisAfter-balance1ThisBefore, balance1ManagerBefore-balance1ManagerAfter);
+        assertEq(balance0ThisBefore-balance0ThisAfter, balance0ManagerAfter-balance0ManagerBefore);
 
         uint160 liquidityAfter2 = manager.getLiquidity(poolId);
         assertGt(liquidityAfter2, liquidityAfter); // liquidity actually increased (price moved back, can redeposit more vault)
@@ -166,7 +172,7 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
     }
 
     function testManyWhipSaws() public {
-        hook.mint(1*10**18,address(this));
+        hook.mint(10**18,address(this));
         uint256 height = 1;
         uint256 price;
         uint160 newSQRTPrice;
@@ -275,7 +281,7 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
 
     function testSwaps() public {
         hook.mint(10**20,address(this));
-        // uint256 height = 1;
+        uint256 height = 1;
         uint256 price = 4;
         uint160 newSQRTPrice = computeNewSQRTPrice(price);
 
@@ -303,49 +309,62 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
         uint256 hedgeRequired0 = hook.hedgeRequired0();
         uint256 hedgeRequired1 = hook.hedgeRequired1();
 
-        assertGt(hedgeRequired1, 0);
-        assertEq(hedgeRequired0, 0);
-
         assertGt(balance0Before, balance0After);
         assertGt(balance1After, balance1Before);
-        // assertEq(balance1Before-balance1After, hedgeRequired1-1);
+        assertGt(hedgeRequired1, 0);
+        assertEq(hedgeRequired0, 0);
+        assertEq(balance1After-balance1Before, hedgeRequired1-1);
 
         // now the swapper is going to sell token 1s for 0s back to the pool
         // in approx the same size as before 
         // to move the pool price back to original price
-        // params = IPoolManager.SwapParams({zeroForOne: false, amountSpecified: -int256(hedgeRequired1), sqrtPriceLimitX96:computeNewSQRTPrice(5)});
+        params = IPoolManager.SwapParams({zeroForOne: false, amountSpecified: -int256(hedgeRequired1), sqrtPriceLimitX96:computeNewSQRTPrice(5)});
 
-        // balance0Before = token0.balanceOf(address(this));
-        // balance1Before = token1.balanceOf(address(this));
+        balance0Before = token0.balanceOf(address(this));
+        balance1Before = token1.balanceOf(address(this));
 
-        // swapRouter.swap(poolKey, params, settings);
+        swapRouter.swap(poolKey, params, settings);
 
-        // balance0After = token0.balanceOf(address(this));
-        // balance1After = token1.balanceOf(address(this));
+        balance0After = token0.balanceOf(address(this));
+        balance1After = token1.balanceOf(address(this));
 
-        // hedgeRequired0 = hook.hedgeRequired0();
-        // hedgeRequired1 = hook.hedgeRequired1();
+        hedgeRequired0 = hook.hedgeRequired0();
+        hedgeRequired1 = hook.hedgeRequired1();
 
-        // assertGt(balance1Before, balance1After);
-        // assertGt(balance0After, balance0Before);
-        // assertGt(hedgeRequired0, 0);
-        // assertEq(hedgeRequired1, 0);
-        // assertEq(balance0After-balance0Before, hedgeRequired0-1);
+        assertGt(balance1Before, balance1After);
+        assertGt(balance0After, balance0Before);
+        assertGt(hedgeRequired0, 0);
+        assertEq(hedgeRequired1, 0);
 
-        // hook contract retains 1 wei to perform the kick in the next block
-        // this is the reason for the -1
-        // using hardcoded hedge committed values for other checks
-        // if (hook.hedgeRequired0()>0){
-        //     hook.withdrawHedgeCommitment(hedgeCommit0-uint128(uint256((hook.hedgeRequired0())))-1, hedgeCommit1);
-        // }else{
-        //     hook.withdrawHedgeCommitment(hedgeCommit0,hedgeCommit1-uint128(uint256((hook.hedgeRequired1())))-1);
-        // }
+        hook.withdrawHedgeCommitment(hedgeCommit0-hedgeRequired0, hedgeCommit1);
 
-        // console.log("go to next block and arb to a new price as a sense check");
-        // vm.roll(++height);
-        // price=2;
-        // newSQRTPrice=computeNewSQRTPrice(price);
-        // hook.openPool(newSQRTPrice);
+        params = IPoolManager.SwapParams({zeroForOne: true, amountSpecified: 2**80, sqrtPriceLimitX96:computeNewSQRTPrice(4)});
+
+        balance0Before = token0.balanceOf(address(this));
+        balance1Before = token1.balanceOf(address(this));
+
+        swapRouter.swap(poolKey, params, settings);
+
+        balance0After = token0.balanceOf(address(this));
+        balance1After = token1.balanceOf(address(this));
+
+        hedgeRequired0 = hook.hedgeRequired0();
+        hedgeRequired1 = hook.hedgeRequired1();
+
+        assertGt(balance0Before, balance0After);
+        assertGt(balance1After, balance1Before);
+        assertEq(hedgeRequired0, 0);
+        assertEq(hedgeRequired1, 0);
+
+        hook.withdrawHedgeCommitment(hook.hedgeCommitted0(), 0);
+
+        assertEq(hook.hedgeCommitted0(), 0);
+        assertEq(hook.hedgeCommitted1(), 0);
+
+        vm.roll(++height);
+        price=2;
+        newSQRTPrice=computeNewSQRTPrice(price);
+        hook.openPool(newSQRTPrice);
     }
 
 
