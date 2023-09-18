@@ -582,7 +582,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     function _lockAcquiredMint(PoolManagerCalldata memory pmCalldata) internal {
         uint256 totalSupply = totalSupply();
-
+        //console.log(totalSupply);
         if (totalSupply == 0) {
             poolManager.modifyPosition(
                 poolKey,
@@ -597,6 +597,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             // needed to get around a rounding error
             _a0=uint256(poolManager.currencyDelta(address(this),poolKey.currency0));
             _a1=uint256(poolManager.currencyDelta(address(this),poolKey.currency1));
+            //console.log(uint256(_a0),uint256(_a1));
             if (_a0 > 0) {
                 _transferFromOrTransferNative(
                     poolKey.currency0,
@@ -671,16 +672,18 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                     })
                 );
             
+            //console.log("mint amounts0",amount0,uint256(poolManager.currencyDelta(address(this), poolKey.currency0)) );
+            //console.log("mint amounts1",amount1,uint256(poolManager.currencyDelta(address(this), poolKey.currency1)) );
             
-            // if true, this implies the vault contains token 1s
-            if(uint256(-poolManager.currencyDelta(address(this), poolKey.currency1))<uint256(poolManager.currencyDelta(address(this), poolKey.currency1))){
-                // we want to perform rounding on token 0s
-                amount0=max(amount0,uint256(poolManager.currencyDelta(address(this), poolKey.currency0)));
-            } else{
-                // we want to perform rounding on token 1s
-                amount1=max(amount1,uint256(poolManager.currencyDelta(address(this), poolKey.currency1)));
+            uint256 temp0=max(amount0,uint256(poolManager.currencyDelta(address(this), poolKey.currency0)));
+            uint256 temp1=max(amount1,uint256(poolManager.currencyDelta(address(this), poolKey.currency1)));
+            if(temp0-amount0>0 && temp0-amount0<5){
+                amount0=temp0;
             }
-               
+            if((temp1-amount1>0) && (temp1-amount1<5)){
+                amount1=temp1;
+            }
+            
              
 
             if (amount0 > 0) {
@@ -769,7 +772,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         // adds the required amount back into the pool
         // V NICE
         uint256 newLiquidity = liquidity - FullMath.mulDiv(pmCalldata.amount, liquidity, totalSupply);
-        console.log("burn",liquidity, newLiquidity,totalSupply);
+        //console.log("burn",liquidity, newLiquidity,totalSupply);
         if (newLiquidity > 0)
             poolManager.modifyPosition(
                 poolKey,
@@ -784,10 +787,16 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
        
         // take amounts and send them to receiver
-
-        amount0=min(amount0,uint256(-poolManager.currencyDelta(address(this), poolKey.currency0)));
-        amount1=min(amount1,uint256(-poolManager.currencyDelta(address(this), poolKey.currency1)));
-        
+        //console.log("amounts0",amount0,uint256(-poolManager.currencyDelta(address(this), poolKey.currency0)) );
+        //console.log("amounts1",amount1,uint256(-poolManager.currencyDelta(address(this), poolKey.currency1)) );
+        uint256 temp0=min(amount0,uint256(-poolManager.currencyDelta(address(this), poolKey.currency0)));
+        if(amount0-temp0>0 && amount0-temp0<5){
+            amount0=temp0;
+        }
+        uint256 temp1=min(amount1,uint256(-poolManager.currencyDelta(address(this), poolKey.currency1)));
+        if((amount1-temp1>0) && (amount1-temp1<5)){
+            amount1=temp1;
+        }
         if (amount0 > 0) {
             poolManager.take(
                 poolKey.currency0,
