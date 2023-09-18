@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 
 // import {console} from "forge-std/console.sol";
-
+import {console} from "forge-std/console.sol";
 import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
 import {BaseHook} from "@uniswap/v4-periphery/contracts/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
@@ -645,7 +645,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             _clear1155Balances();
 
             (uint256 currency0Balance, uint256 currency1Balance) = _checkCurrencyBalances();
-
             uint256 amount0 = FullMath.mulDiv(
                 pmCalldata.amount,
                 currency0Balance,
@@ -657,12 +656,11 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 totalSupply
             );
 
-            _a0 = amount0;
-            _a1 = amount1;
 
+            
             // mint back the position.
             uint256 newLiquidity = liquidity + FullMath.mulDiv(pmCalldata.amount, liquidity, totalSupply);
-
+            
             if (newLiquidity > 0)
                 poolManager.modifyPosition(
                     poolKey,
@@ -672,6 +670,18 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                         tickUpper: upperTick
                     })
                 );
+            
+            
+            // if true, this implies the vault contains token 1s
+            if(uint256(-poolManager.currencyDelta(address(this), poolKey.currency1))<uint256(poolManager.currencyDelta(address(this), poolKey.currency1))){
+                // we want to perform rounding on token 0s
+                amount0=max(amount0,uint256(poolManager.currencyDelta(address(this), poolKey.currency0)));
+            } else{
+                // we want to perform rounding on token 1s
+                amount1=max(amount1,uint256(poolManager.currencyDelta(address(this), poolKey.currency1)));
+            }
+               
+             
 
             if (amount0 > 0) {
                 _transferFromOrTransferNative(
@@ -682,6 +692,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 );
                 poolManager.settle(poolKey.currency0);
             }
+            
             if (amount1 > 0) {
                 _transferFromOrTransferNative(
                     poolKey.currency1,
@@ -691,6 +702,9 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 );
                 poolManager.settle(poolKey.currency1);
             }
+
+            _a0 = amount0;
+            _a1 = amount1;
         }
         _mintLeftover();
 
@@ -737,25 +751,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
         _clear1155Balances();
 
-
-        // recreate the position
-        // CONOR
-        // takes the required % from the pool
-        // adds the required amount back into the pool
-        // V NICE
-        uint256 newLiquidity = liquidity - FullMath.mulDiv(pmCalldata.amount, liquidity, totalSupply);
-        if (newLiquidity > 0)
-            poolManager.modifyPosition(
-                poolKey,
-                IPoolManager.ModifyPositionParams({
-                    liquidityDelta: SafeCast.toInt256(newLiquidity),
-                    tickLower: lowerTick,
-                    tickUpper: upperTick
-                })
-            );
-        
         (uint256 currency0Balance, uint256 currency1Balance) = _checkCurrencyBalances();
-                
         uint256 amount0 = FullMath.mulDiv(
             pmCalldata.amount,
             currency0Balance,
@@ -766,8 +762,32 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             currency1Balance,
             totalSupply
         );
+        
+        // recreate the position
+        // CONOR
+        // takes the required % from the pool
+        // adds the required amount back into the pool
+        // V NICE
+        uint256 newLiquidity = liquidity - FullMath.mulDiv(pmCalldata.amount, liquidity, totalSupply);
+        console.log("burn",liquidity, newLiquidity,totalSupply);
+        if (newLiquidity > 0)
+            poolManager.modifyPosition(
+                poolKey,
+                IPoolManager.ModifyPositionParams({
+                    liquidityDelta: SafeCast.toInt256(newLiquidity),
+                    tickLower: lowerTick,
+                    tickUpper: upperTick
+                })
+            );
+        
+        
 
+       
         // take amounts and send them to receiver
+
+        amount0=min(amount0,uint256(-poolManager.currencyDelta(address(this), poolKey.currency0)));
+        amount1=min(amount1,uint256(-poolManager.currencyDelta(address(this), poolKey.currency1)));
+        
         if (amount0 > 0) {
             poolManager.take(
                 poolKey.currency0,
@@ -783,17 +803,24 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             );
         }
 
+        
+
         _a0 = amount0;
         _a1 = amount1;
-        
         _mintLeftover();
-
         if (hedgeRequired0 > 0) {
             hedgeRequired0 -= FullMath.mulDiv(hedgeRequired0, pmCalldata.amount, totalSupply);
         }
         if (hedgeRequired1 > 0) {
             hedgeRequired1 -= FullMath.mulDiv(hedgeRequired1, pmCalldata.amount, totalSupply);
         }
+    }
+
+    function min(uint256 a, uint256 b) public pure returns (uint256) {
+        return a < b ? a : b;
+    }
+    function max(uint256 a, uint256 b) public pure returns (uint256) {
+        return a > b ? a : b;
     }
 
     function _resetLiquidity(bool isMintOrBurn) internal returns (uint160 sqrtPriceX96, uint160 newSqrtPriceX96, uint128 liquidity, uint128 newLiquidity) {
