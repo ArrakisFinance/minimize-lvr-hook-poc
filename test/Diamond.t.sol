@@ -396,7 +396,7 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
     }
 
     function computeDecPriceFromNewSQRTPrice_PIPS(uint160 price) internal pure returns (uint256 y){
-        y=FullMath.mulDiv(PIPS*uint256(price)**2,1,2**192);
+        y=FullMath.mulDiv(uint256(price)**2,PIPS,2**192);
     }
 
     function computeDecPriceFromNewSQRTPrice(uint160 price) internal pure returns (uint256 y){

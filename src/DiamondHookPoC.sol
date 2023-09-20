@@ -138,7 +138,8 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         uint256[] calldata,
         uint256[] calldata,
         bytes calldata
-    ) external pure returns (bytes4) {
+    ) external view returns (bytes4) {
+        if (msg.sender != address(poolManager)) revert NotPoolManagerToken();
         return
             bytes4(
                 keccak256(
@@ -209,9 +210,8 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         /// if swap is coming from the hook then its a 1 wei swap to kick the price and not a "normal" swap
         if (sender != address(this)) {
             /// cannot move price to edge of LP positin
-            (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(
-                PoolIdLibrary.toId(poolKey)
-            );
+            PoolId poolId = PoolIdLibrary.toId(poolKey);
+            (uint160 sqrtPriceX96, , , , , ) = poolManager.getSlot0(poolId);
             uint160 sqrtPriceX96Lower = TickMath.getSqrtRatioAtTick(lowerTick);
             uint160 sqrtPriceX96Upper = TickMath.getSqrtRatioAtTick(upperTick);
             if (
@@ -221,12 +221,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
             Position.Info memory info = PoolManager(
                 payable(address(poolManager))
-            ).getPosition(
-                    PoolIdLibrary.toId(poolKey),
-                    address(this),
-                    lowerTick,
-                    upperTick
-                );
+            ).getPosition(poolId, address(this), lowerTick, upperTick);
 
             (uint256 current0, uint256 current1) = LiquidityAmounts
                 .getAmountsForLiquidity(
@@ -687,8 +682,16 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 poolManager.currencyDelta(address(this), poolKey.currency1)
             );
 
-            amount0 += FullMath.mulDivRoundingUp(leftOver0, pmCalldata.amount, totalSupply);
-            amount1 += FullMath.mulDivRoundingUp(leftOver1, pmCalldata.amount, totalSupply);
+            amount0 += FullMath.mulDivRoundingUp(
+                leftOver0,
+                pmCalldata.amount,
+                totalSupply
+            );
+            amount1 += FullMath.mulDivRoundingUp(
+                leftOver1,
+                pmCalldata.amount,
+                totalSupply
+            );
 
             if (amount0 > 0) {
                 _transferFromOrTransferNative(
@@ -729,6 +732,10 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 totalSupply
             );
         }
+
+        if (
+            hedgeRequired0 > hedgeCommitted0 || hedgeRequired1 > hedgeCommitted1
+        ) revert InsufficientHedgeCommitted();
     }
 
     // this function gets the supply of LP tokens, the supply of LP tokens to removes,
@@ -799,10 +806,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 })
             );
 
-        (
-            currency0Balance,
-            currency1Balance
-        ) = _checkCurrencyBalances();
+        (currency0Balance, currency1Balance) = _checkCurrencyBalances();
 
         amount0 = amount0 > currency0Balance ? currency0Balance : amount0;
         amount1 = amount1 > currency1Balance ? currency1Balance : amount1;
@@ -1159,7 +1163,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         /// cannot do arb in zero liquidity
         if (params.liquidity == 0) revert LiquidityZero();
 
-        /// cannot move price to edge of LP positin
+        /// cannot move price to edge of LP position
         if (
             params.newSqrtPriceX96 >= params.sqrtPriceX96Upper ||
             params.newSqrtPriceX96 <= params.sqrtPriceX96Lower
