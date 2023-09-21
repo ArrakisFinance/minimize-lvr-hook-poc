@@ -809,7 +809,10 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 })
             );
 
-        (currency0Balance, currency1Balance) = _checkCurrencyBalances();
+        (
+            currency0Balance,
+            currency1Balance
+        ) = _checkCurrencyBalances();
 
         amount0 = amount0 > currency0Balance ? currency0Balance : amount0;
         amount1 = amount1 > currency1Balance ? currency1Balance : amount1;
@@ -1166,7 +1169,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         /// cannot do arb in zero liquidity
         if (params.liquidity == 0) revert LiquidityZero();
 
-        /// cannot move price to edge of LP position
+        /// cannot move price to edge of LP positin
         if (
             params.newSqrtPriceX96 >= params.sqrtPriceX96Upper ||
             params.newSqrtPriceX96 <= params.sqrtPriceX96Lower
