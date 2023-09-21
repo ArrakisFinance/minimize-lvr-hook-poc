@@ -65,7 +65,6 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
             token1 = temp;
         }
         
-        
         manager = new PoolManager(500000);
 
         DiamondImplementation impl = new DiamondImplementation(manager, hook,tickSpacing,baseBeta,decayRate,vaultRedepositRate);
@@ -101,6 +100,21 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
         assertEq(upperTick, 887270);
     }
 
+    function test_opening_totalsupply_zero() public {
+        uint256 height = 1;
+        vm.roll(height);
+
+        // do arb swap (price rises from initial)
+        uint160 newSQRTPrice = computeNewSQRTPrice(4);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DiamondHookPoC.TotalSupplyZero.selector
+            )
+        );
+
+        hook.openPool(newSQRTPrice);
+    }
 
     function testBasicArbSwap() public {
         // mint some liquidity
@@ -376,7 +390,6 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
         newSQRTPrice=computeNewSQRTPrice(price);
         hook.openPool(newSQRTPrice);
     }
-
 
     function _sqrt(uint256 x) internal pure returns (uint256 y) {
         uint256 z = (x + 1) / 2;

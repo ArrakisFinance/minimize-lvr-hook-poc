@@ -52,6 +52,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     error WithdrawExceedsAvailable();
     error OnlyCommitter();
     error PriceOutOfBounds();
+    error TotalSupplyZero();
 
     uint24 internal constant _PIPS = 1000000;
 
@@ -289,6 +290,8 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     /// anyone can call this method to "open the pool" with top of block arb swap.
     /// no swaps will be processed in a block unless this method is called first in that block.
     function openPool(uint160 newSqrtPriceX96_) external payable nonReentrant {
+        if(totalSupply() == 0) revert TotalSupplyZero();
+
         /// encode calldata to pass through lock()
         bytes memory data = abi.encode(
             PoolManagerCalldata({
