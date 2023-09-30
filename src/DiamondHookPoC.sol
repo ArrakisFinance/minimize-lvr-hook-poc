@@ -51,6 +51,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     error OnlyCommitter();
     error PriceOutOfBounds();
     error TotalSupplyZero();
+    error InvalidCurrencyDelta();
 
     uint24 internal constant _PIPS = 1000000;
 
@@ -237,12 +238,12 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                 );
 
             if (need0 > current0) {
-                uint256 min0 = need0 + 1 - current0;
+                uint256 min0 = need0 - current0;
                 if (min0 > hedgeCommitted0) revert InsufficientHedgeCommitted();
                 hedgeRequired0 = min0;
                 hedgeRequired1 = 0;
             } else if (need1 > current1) {
-                uint256 min1 = need1 + 1 - current1;
+                uint256 min1 = need1 - current1;
                 if (min1 > hedgeCommitted1) revert InsufficientHedgeCommitted();
                 hedgeRequired1 = min1;
                 hedgeRequired0 = 0;
@@ -305,7 +306,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         committedSqrtPriceX96 = newSqrtPriceX96_;
         lastBlockOpened = block.number;
 
-        /// handle eth refunds (question: may not be necessary as block producer should know exactly the amount of eth needed ??)
+        /// handle eth refunds (question: is this necessary?)
         if (poolKey.currency0.isNative()) {
             uint256 leftover = address(this).balance;
             if (leftover > 0) _nativeTransfer(msg.sender, leftover);
@@ -504,31 +505,14 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             /// swap 1 wei in zero liquidity to kick the price to newSqrtPriceX96
             bool zeroForOne = newSqrtPriceX96 < sqrtPriceX96Virtual;
             if (newSqrtPriceX96 != sqrtPriceX96Real) {
-                bool zeroForOneReal = newSqrtPriceX96 < sqrtPriceX96Real;
                 poolManager.swap(
                     poolKey,
                     IPoolManager.SwapParams({
-                        zeroForOne: zeroForOneReal,
+                        zeroForOne: newSqrtPriceX96 < sqrtPriceX96Real,
                         amountSpecified: 1,
                         sqrtPriceLimitX96: newSqrtPriceX96
                     })
                 );
-
-                // Conor
-                // 0/1 ERROR ???
-                if (zeroForOneReal) {
-                    if (zeroForOne) {
-                        swap0 += 1;
-                    } else {
-                        swap0 -= 1;
-                    }
-                } else {
-                    if (zeroForOne) {
-                        swap1 -= 1;
-                    } else {
-                        swap1 += 1;
-                    }
-                }
             }
 
             /// handle swap transfers (send to / transferFrom arber)
@@ -553,9 +537,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
                     address(poolManager),
                     swap1
                 );
-                // CONOR
-                // THIS SETTLE SEEMS TO BE FAULTY
-                // it was faulty at one point...
+
                 poolManager.settle(poolKey.currency1);
                 /// transfer swapOutAmt to arber
                 poolManager.take(poolKey.currency0, pmCalldata.receiver, swap0);
@@ -591,7 +573,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     function _lockAcquiredMint(PoolManagerCalldata memory pmCalldata) internal {
         uint256 totalSupply = totalSupply();
-        //console.log(totalSupply);
+
         if (totalSupply == 0) {
             poolManager.modifyPosition(
                 poolKey,
@@ -603,14 +585,12 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             );
 
             // casting to uint256 is ok for minting
-            // needed to get around a rounding error
-            _a0 = uint256(
+            _a0 = SafeCast.toUint256(
                 poolManager.currencyDelta(address(this), poolKey.currency0)
             );
-            _a1 = uint256(
+            _a1 = SafeCast.toUint256(
                 poolManager.currencyDelta(address(this), poolKey.currency1)
             );
-            //console.log(uint256(_a0),uint256(_a1));
             if (_a0 > 0) {
                 _transferFromOrTransferNative(
                     poolKey.currency0,
@@ -787,14 +767,9 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             totalSupply
         );
 
-        // recreate the position
-        // CONOR
-        // takes the required % from the pool
-        // adds the required amount back into the pool
-        // V NICE
         uint256 newLiquidity = liquidity -
             FullMath.mulDiv(pmCalldata.amount, liquidity, totalSupply);
-        //console.log("burn",liquidity, newLiquidity,totalSupply);
+
         if (newLiquidity > 0)
             poolManager.modifyPosition(
                 poolKey,
@@ -965,18 +940,12 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         }
     }
 
-    // START HERE. 1 UNIT OF CURRENCY MESSING THINGS UP
-    // can we mint and settle at the same time???
-    // CONOR
-    // Fixed
     function _mintLeftover() internal {
         (
             uint256 currencyBalance0,
             uint256 currencyBalance1
         ) = _checkCurrencyBalances();
-        // CONOR
-        // not sure if it always holds
-        // need to check multiple price moves in same direction
+
         if (currencyBalance0 > 0) {
             poolManager.mint(
                 poolKey.currency0,
@@ -1069,19 +1038,13 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             address(this),
             poolKey.currency0
         );
-        if (currency0BalanceRaw > 0) {
-            // console.logString("currency0BalanceRaw : ");
-            // console.logInt(currency0BalanceRaw);
-            revert("delta currency0 cannot be positive");
-        }
+        if (currency0BalanceRaw > 0) revert InvalidCurrencyDelta();
         uint256 currency0Balance = SafeCast.toUint256(-currency0BalanceRaw);
         int256 currency1BalanceRaw = poolManager.currencyDelta(
             address(this),
             poolKey.currency1
         );
-        if (currency1BalanceRaw > 0) {
-            revert("delta currency1 cannot be positive");
-        }
+        if (currency1BalanceRaw > 0) revert InvalidCurrencyDelta();
         uint256 currency1Balance = SafeCast.toUint256(-currency1BalanceRaw);
 
         return (currency0Balance, currency1Balance);
@@ -1142,9 +1105,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             finalSqrtPriceX96 <= sqrtPriceX96Lower
         ) revert PriceOutOfBounds();
 
-        // Conor
-        // 0/1 ERROR ???
-
         if (isMintOrBurn) {
             totalHoldings0 -= 1;
             totalHoldings1 -= 1;
@@ -1189,8 +1149,8 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             params.liquidity
         );
 
-        //Conor
-        // Is this error necessary?
+
+        // question: Is this error necessary?
         if (new0 == current0 || new1 == current1) revert ArbTooSmall();
         bool zeroForOne = new0 > current0;
 
