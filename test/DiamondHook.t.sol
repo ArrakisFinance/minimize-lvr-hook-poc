@@ -356,7 +356,7 @@ contract TestDiamondHook is Test, Deployers, GasSnapshot {
         assertGt(balance1After, balance1Before);
         assertGt(hedgeRequired1, 0);
         assertEq(hedgeRequired0, 0);
-        assertEq(balance1After-balance1Before, hedgeRequired1-1);
+        assertEq(balance1After-balance1Before, hedgeRequired1);
 
         // now the swapper is going to sell token 1s for 0s back to the pool
         // in approx the same size as before 
