@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.20;
+pragma solidity 0.8.20;
 
-// import {console} from "forge-std/console.sol";
-import {console} from "forge-std/console.sol";
 import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
 import {BaseHook} from "@uniswap/v4-periphery/contracts/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
@@ -76,7 +74,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
     uint256 public hedgeCommitted1;
     uint160 public committedSqrtPriceX96;
     PoolKey public poolKey;
-    PoolId public poolId;
     address public committer;
     bool public initialized;
 
@@ -114,7 +111,6 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
         baseBeta = _baseBeta;
         decayRate = _decayRate;
         vaultRedepositRate = _vaultRedepositRate;
-        poolId = poolKey.toId();
     }
 
     function onERC1155Received(
@@ -1026,6 +1022,7 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
 
     function _get1155Balances()
         internal
+        view
         returns (
             uint256 currency0Id,
             uint256 leftOver0,
@@ -1073,8 +1070,8 @@ contract DiamondHookPoC is BaseHook, ERC20, IERC1155Receiver, ReentrancyGuard {
             poolKey.currency0
         );
         if (currency0BalanceRaw > 0) {
-            console.logString("currency0BalanceRaw : ");
-            console.logInt(currency0BalanceRaw);
+            // console.logString("currency0BalanceRaw : ");
+            // console.logInt(currency0BalanceRaw);
             revert("delta currency0 cannot be positive");
         }
         uint256 currency0Balance = SafeCast.toUint256(-currency0BalanceRaw);

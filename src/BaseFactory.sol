@@ -4,8 +4,6 @@ pragma solidity ^0.8.20;
 import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
 import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
 
-import {console} from "forge-std/console.sol";
-
 abstract contract BaseFactory {
     /// @notice zero out all but the first byte of the address which is all 1's
     uint160 public constant UNISWAP_FLAG_MASK = 0xff << 152;
