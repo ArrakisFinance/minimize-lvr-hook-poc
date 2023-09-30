@@ -23,10 +23,9 @@ import {Position} from "@uniswap/v4-core/contracts/libraries/Position.sol";
 import {console} from "forge-std/console.sol";
 
 import {DiamondHookPoC} from "../src/DiamondHookPoC.sol";
-import {DiamondImplementation} from "./utils/DiamondImplementation.sol";
+import {DiamondHookImpl} from "./utils/DiamondHookImpl.sol";
 
-
-contract TestDiamond is Test, Deployers, GasSnapshot {
+contract TestDiamondHook is Test, Deployers, GasSnapshot {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
@@ -68,7 +67,7 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
         
         manager = new PoolManager(500000);
 
-        DiamondImplementation impl = new DiamondImplementation(manager, hook,tickSpacing,baseBeta,decayRate,vaultRedepositRate);
+        DiamondHookImpl impl = new DiamondHookImpl(manager, hook,tickSpacing,baseBeta,decayRate,vaultRedepositRate);
         (, bytes32[] memory writes) = vm.accesses(address(impl));
         vm.etch(address(hook), address(impl).code);
         // for each storage key that was written during the hook implementation, copy the value over
