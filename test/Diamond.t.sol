@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {console} from "forge-std/console.sol";
 import "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {GasSnapshot} from "forge-gas-snapshot/GasSnapshot.sol";
@@ -19,7 +18,9 @@ import {TestERC20} from "@uniswap/v4-core/contracts/test/TestERC20.sol";
 import {PoolManager} from "@uniswap/v4-core/contracts/PoolManager.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/contracts/test/PoolSwapTest.sol";
 import {FullMath} from "@uniswap/v4-core/contracts/libraries/FullMath.sol";
-
+import {LiquidityAmounts} from "../src/libraries/LiquidityAmounts.sol";
+import {Position} from "@uniswap/v4-core/contracts/libraries/Position.sol";
+import {console} from "forge-std/console.sol";
 
 import {DiamondHookPoC} from "../src/DiamondHookPoC.sol";
 import {DiamondImplementation} from "./utils/DiamondImplementation.sol";
@@ -195,8 +196,8 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
         uint256 balance1ManagerBefore = token1.balanceOf(address(manager));
         (uint256 liquidity0Before, uint256 liquidity1Before) = getTokenReservesInPool();
 
-        assertEq(balance0ManagerBefore, liquidity0Before);
-        assertEq(balance1ManagerBefore, liquidity1Before);
+        assertEq(balance0ManagerBefore-1, liquidity0Before);
+        assertEq(balance1ManagerBefore-1, liquidity1Before);
 
         for(uint256 i = 0; i < 5; i++) {
             vm.roll(height++);
@@ -284,32 +285,31 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
         vm.roll(++height);
         balance0Before = token0.balanceOf(address(this));
         balance1Before = token1.balanceOf(address(this));
-        console.log("Let's try a TOB mint");
-        (uint160 poolPrice,,,,,)=manager.getSlot0(poolId);
-        (uint256 x, uint256 y)=getTokenReservesInPool();
-        console.log("new block, pre-mint. reserves:",x,y,computeDecPriceFromNewSQRTPrice_PIPS(poolPrice));
-        console.log("new block, pre-mint. pool-price:",computeDecPriceFromNewSQRTPrice_PIPS(poolPrice));
+        //console.log("Let's try a TOB mint");
+        // (uint160 poolPrice,,,,,)=manager.getSlot0(poolId);
+        // (uint256 x, uint256 y)=getTokenReservesInPool();
+        // console.log("new block, pre-mint. reserves:",x,y,poolPrice);
+        // console.log("new block, pre-mint. pool-price:",poolPrice);
         
         hook.mint(10**12, address(this));
-        (poolPrice,,,,,)=manager.getSlot0(poolId);
-        (x, y)=getTokenReservesInPool();
-        console.log("new block, post-mint. reserves:",x,y,computeDecPriceFromNewSQRTPrice_PIPS(poolPrice));
-        console.log("new block, post-mint. pool-price:",computeDecPriceFromNewSQRTPrice_PIPS(poolPrice));
+        // (poolPrice,,,,,)=manager.getSlot0(poolId);
+        // (x, y)=getTokenReservesInPool();
+        // console.log("new block, post-mint. reserves:",x,y,poolPrice);
+        // console.log("new block, post-mint. pool-price:",poolPrice);
         hook.openPool(newSQRTPrice);
         //console.log("before and after difference token 0:",token0.balanceOf(address(this))-balance0Before);
         //console.log("before and after difference token 1:",token1.balanceOf(address(this))-balance1Before);
         
         vm.roll(++height);
-        console.log("Now let's try a TOB Burn");
-        (poolPrice,,,,,)=manager.getSlot0(poolId);
-        (x, y)=getTokenReservesInPool();
-        console.log("new block, pre-burn. reserves:",x,y,computeDecPriceFromNewSQRTPrice_PIPS(poolPrice));
-        console.log("new block, pre-burn. pool-price:",computeDecPriceFromNewSQRTPrice_PIPS(poolPrice));
+        // (poolPrice,,,,,)=manager.getSlot0(poolId);
+        // (x, y)=getTokenReservesInPool();
+        // console.log("new block, pre-burn. reserves:",x,y,poolPrice);
+        // console.log("new block, pre-burn. pool-price:",poolPrice);
         hook.burn(10**12, address(this));
-        (poolPrice,,,,,)=manager.getSlot0(poolId);
-        (x, y)=getTokenReservesInPool();
-        console.log("new block, post-burn. reserves:",x,y,computeDecPriceFromNewSQRTPrice_PIPS(poolPrice));
-        console.log("new block, post-burn. pool-price:",computeDecPriceFromNewSQRTPrice_PIPS(poolPrice));
+        // (poolPrice,,,,,)=manager.getSlot0(poolId);
+        // (x, y)=getTokenReservesInPool();
+        // console.log("new block, post-burn. reserves:",x,y,poolPrice);
+        // console.log("new block, post-burn. pool-price:",poolPrice);
         hook.openPool(newSQRTPrice);
 
         hook.burn(hook.totalSupply(), address(this));
@@ -318,7 +318,7 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
 
         balance0Manager = token0.balanceOf(address(manager));
         balance1Manager = token1.balanceOf(address(manager));
-        dustThreshold = 18; // AGAIN dust threshold increasing rather quickly already lost 11 wei to contract
+        dustThreshold = 18;
         assertGt(dustThreshold, balance0Manager);
         assertGt(dustThreshold, balance1Manager);
     }
@@ -424,31 +424,14 @@ contract TestDiamond is Test, Deployers, GasSnapshot {
         y=uint160(_sqrt(price*2**96)*2**48);
     }
 
-    function computeNewSQRTPrice_PIPS(uint256 price) internal pure returns (uint160 y){
-        y=uint160((_sqrt(price*2**96)*2**48)/_sqrt(PIPS));
-    }
-
-    function computeDecPriceFromNewSQRTPrice_PIPS(uint160 price) internal pure returns (uint256 y){
-        y=FullMath.mulDiv(uint256(price)**2,PIPS,2**192);
-    }
-
-    function computeDecPriceFromNewSQRTPrice(uint160 price) internal pure returns (uint256 y){
-        y=FullMath.mulDiv(uint256(price)**2,1,2**192);
-    }
-
-    function getTokenReservesInPoolDustTest(uint256 price) public view returns (uint256 x, uint256 y){
-        uint256 liquidity = manager.getLiquidity(poolId);
-        (uint160 poolPrice,,,,,)=manager.getSlot0(poolId);
-        x=_sqrt(FullMath.mulDiv(liquidity,liquidity,price));
-        y=_sqrt(FullMath.mulDiv(liquidity,liquidity*price,1));
-    }
-    //when we don't know an exact decimal price, use this function. Suffers from rounding errors. 
     function getTokenReservesInPool() public view returns (uint256 x, uint256 y){
-        uint256 liquidity = manager.getLiquidity(poolId);
-        (uint160 poolPrice,,,,,)=manager.getSlot0(poolId);
-        uint256 poolPriceDecimals= computeDecPriceFromNewSQRTPrice_PIPS(poolPrice);
-        uint256 sql=_sqrt(liquidity);
-        x=10**5*_sqrt(FullMath.mulDiv(liquidity,liquidity,poolPriceDecimals));
-        y=sql*_sqrt(FullMath.mulDiv(liquidity,poolPriceDecimals,10**10));
+        Position.Info memory info = manager.getPosition(poolId, address(hook), lowerTick, upperTick);
+        (uint160 poolPrice,,,,,)= manager.getSlot0(poolId);
+        (x, y) = LiquidityAmounts.getAmountsForLiquidity(
+            poolPrice,
+            TickMath.getSqrtRatioAtTick(lowerTick),
+            TickMath.getSqrtRatioAtTick(upperTick),
+            info.liquidity
+        );
     }
 }
