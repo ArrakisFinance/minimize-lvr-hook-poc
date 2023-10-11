@@ -100,7 +100,7 @@ contract TestDiamondHook is Test, Deployers, GasSnapshot {
         assertEq(upperTick, 887270);
     }
 
-    function test_opening_totalsupply_zero() public {
+    function testOpeningTotalSupplyZero() public {
         uint256 height = 1;
         vm.roll(height);
 
