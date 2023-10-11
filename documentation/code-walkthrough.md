@@ -26,7 +26,7 @@ Given collateral has been deposited, and the `beforeSwap` and `afterSwap` hooks 
 
 ## Typical block containing Diamond swaps
 
-To avoid repetition, we define *Condition 1* to be: _The amount of collateral deposited in `depositHedgeCommitment()` is enough to move the price of the pool back to the price committed to in the `openPool()` transaction for that block._
+To avoid repetition, we define **Condition 1** to be: _The amount of collateral deposited in `depositHedgeCommitment()` is enough to move the price of the pool back to the price committed to in the `openPool()` transaction for that block._
 
 - `openPool()` is called, moving the pool price to the committed price.
 - `depositHedgeCommitment()` is called, depositing collateral to the Hook protocol. This can be called arbitrarily many times in the block if more collateral is required later in the block.
@@ -46,7 +46,7 @@ In the `test/DiamondHook.t.sol` file, we perform a series of basic, (hopefully) 
 
 ## Caveats
 
-*This code is not audited and likely contains bugs. Do not deploy without auditing.*
+**This code is not audited and likely contains bugs. Do not deploy without auditing.**
 
 This code is pinned to use an older version of the Uniswap V4 codebase (which is not frozen and continues to change). Adapting the code to use dependencies that are up to date should be relatively straightforward.
 
