@@ -1,6 +1,6 @@
 # minimize-lvr-hook-poc
 
-read the [blog post](https://google.com) for a basic introduction 
+read the [blog post](https://mirror.xyz/0x916563f8476b988855af0b8b8A3D56072E1917FA/ZhTQJ6qiurBTHBNuF08GudWBQ8x9p3P-12vo-C9czKE) for a basic introduction 
 
 read the [code walkthrough](https://github.com/ArrakisFinance/minimize-lvr-hook-poc/blob/main/documentation/code-walkthrough.md) for a more detailed explanation
 
