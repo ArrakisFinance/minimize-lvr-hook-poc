@@ -1,10 +1,10 @@
 # The Diamond Hook Explained
 
-Let’s dive straight into the `src/DiamondHookPoC.sol` file which contains the Diamond Hook contract. An important thing to note with our implementation is the fact that the Hook contract itself controls the liquidity positions. This is a result of the pool liquidity (pool constant in V2 terms) changing when the pool price updates at the beginning of a block. More on this soon. Users depositing or withdrawing liquidity to the pool must do so through Hook functionalities, namely `mint()` and `burn()` .
+Let’s dive straight into the `src/DiamondHookPoC.sol` file which contains the Diamond Hook contract. An important thing to note with our implementation is the fact that the Hook contract itself controls the liquidity positions. This is a result of the pool liquidity (pool constant in V2 terms) changing when the pool price updates at the beginning of a block. More on this soon. Users depositing or withdrawing liquidity to the pool must do so through Hook functionalities, namely `mint()` and `burn()`.
 
 [img]
 
-The Diamond protocol requires 4 hooks, `beforeInitialize`, `beforeModifyPosition`, `beforeSwap`, and `afterSwap` .
+The Diamond protocol requires 4 hooks, `beforeInitialize`, `beforeModifyPosition`, `beforeSwap`, and `afterSwap`.
 
 Let’s go through what is being checked for in each:
 - beforeInitialize: Basic checks to ensure the pool hasn’t been created before.
@@ -31,12 +31,12 @@ To avoid repetition, we define **Condition 1** to be: _The amount of collateral 
 - `openPool()` is called, moving the pool price to the committed price.
 - `depositHedgeCommitment()` is called, depositing collateral to the Hook protocol. This can be called arbitrarily many times in the block if more collateral is required later in the block.
 - Swaps take place. A swap can only take place in a block if both `openPool()` and `depositHedgeCommitment()` have already been called, and Condition 1 holds after the swap is executed.
-- Liquidity additions and removal can take place through the calling of mint() and burn() at any point in the block as long as Condition 1 hold after the liquidity addition/removal occurs.
+- Liquidity additions and removal can take place through the calling of mint() and burn() at any point in the block as long as Condition 1 holds after the liquidity addition/removal occurs.
 - `withdrawHedgeCommitment()` can be called at any time, as long as Condition 1 holds after the collateral withdrawal takes place.
 
 ## Tests
 
-In the `test/DiamondHook.t.sol` file, we perform a series of basic, (hopefully) self-explanatory tests. First, `setUp()` performs the required setup to deploy a V4 pool with 2 test tokens. We intiialize the pool to price 1, although without any tokens in the `setup()` contract. 
+In the `test/DiamondHook.t.sol` file, we perform a series of basic, (hopefully) self-explanatory tests. First, `setUp()` performs the required setup to deploy a V4 pool with 2 test tokens. We initialize the pool to price 1, although without any tokens in the `setup()` contract. 
 
 - `testOpeningTotalSupplyZero()`: a sanity check to ensure the pool price couldn’t be moved without some tokens in the pool (price moves burn 1 wei from the pool).
 - `testBasicArbSwap()`: mints some tokens, moves the pool price first to 4, then back to 1. The test contains a series of assertions ensuring the token balances in the pool and pool manager act as expected.
